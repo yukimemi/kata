@@ -74,11 +74,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Windows (PATHEXT + .ps1 fallback) the same way rvpm does.
 which = "7"
 
+# Secure tmp file allocation for the AI handoff prompt — must live
+# in [dependencies] (not just [dev-dependencies]) because
+# `ai::process::run_handoff` writes the prompt file at runtime.
+tempfile = "3"
+
 [dev-dependencies]
 assert_cmd = "2"
 assert_fs = "1"
 predicates = "3"
-tempfile = "3"
 
 [profile.release]
 lto = true

@@ -23,6 +23,7 @@
 //! per-file UI (`[a]ccept / [e]dit / [c]hat / [h]andoff / [s]kip /
 //! [d]efer`) lives in `modes/ai.rs` (Phase 3-b).
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
@@ -81,16 +82,19 @@ pub struct ResolvedCli {
 /// then `.ps1` fallback for tools (e.g. pnpm-shipped agents) that
 /// only ship a PowerShell wrapper. Returns the spawn descriptor
 /// the caller can pass straight to tokio's `Command`.
+///
+/// `which::which` already searches PATHEXT on Windows (so `.exe` /
+/// `.cmd` / `.bat` are covered by the first lookup), so the
+/// fallback only has to handle `.ps1` — which PATHEXT does *not*
+/// list by default.
 pub fn resolve_cli(name: &str) -> Option<ResolvedCli> {
     if let Ok(p) = which::which(name) {
         return Some(wrap_if_powershell(p));
     }
     #[cfg(windows)]
     {
-        for ext in ["ps1", "cmd", "bat", "exe"] {
-            if let Ok(p) = which::which(format!("{name}.{ext}")) {
-                return Some(wrap_if_powershell(p));
-            }
+        if let Ok(p) = which::which(format!("{name}.ps1")) {
+            return Some(wrap_if_powershell(p));
         }
     }
     None
@@ -129,11 +133,15 @@ fn wrap_if_powershell(path: PathBuf) -> ResolvedCli {
     }
 }
 
-/// Surface a clear error (with an install hint) when the requested
-/// agent is missing from PATH. Caller-side gate before any work.
-pub fn ensure_cli_installed(backend: Backend) -> Result<()> {
-    if backend.is_available() {
-        return Ok(());
+/// Resolve the agent CLI on PATH and return the spawn descriptor,
+/// or surface a clear error (with an install hint) when it isn't
+/// installed. This is what every spawn site should call — it folds
+/// the PATH lookup and the missing-agent error into one step so
+/// callers don't `is_available()` and then `resolve_cli()`
+/// separately (the redundant lookup was Gemini's review feedback).
+pub fn ensure_cli_installed(backend: Backend) -> Result<ResolvedCli> {
+    if let Some(r) = resolve_cli(backend.cli_name()) {
+        return Ok(r);
     }
     let cli = backend.cli_name();
     let hint = match backend {
@@ -170,9 +178,7 @@ fn resolve_timeout() -> Duration {
 /// kata-side context tags (`<kata:body>` etc.) belong to the
 /// caller.
 pub async fn invoke_chat(backend: Backend, prompt_text: &str) -> Result<String> {
-    ensure_cli_installed(backend)?;
-    let resolved = resolve_cli(backend.cli_name())
-        .ok_or_else(|| Error::Other(anyhow!("AI CLI `{}` is not on PATH", backend.cli_name())))?;
+    let resolved = ensure_cli_installed(backend)?;
 
     tracing::debug!(
         backend = backend.cli_name(),
@@ -276,17 +282,28 @@ pub(crate) fn first_message_strategy(backend: Backend) -> FirstMessageStrategy {
 /// edit; it's woven into the first message but is otherwise
 /// advisory (the agent decides which tools to invoke).
 pub async fn run_handoff(backend: Backend, prompt_text: &str, dst_hint: &Path) -> Result<()> {
-    ensure_cli_installed(backend)?;
-    let resolved = resolve_cli(backend.cli_name())
-        .ok_or_else(|| Error::Other(anyhow!("AI CLI `{}` is not on PATH", backend.cli_name())))?;
+    let resolved = ensure_cli_installed(backend)?;
 
-    let mut tmp_path = std::env::temp_dir();
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    tmp_path.push(format!("kata-ai-prompt-{stamp}.md"));
-    std::fs::write(&tmp_path, prompt_text).map_err(|e| Error::io_at(&tmp_path, e))?;
+    // Use `tempfile` so the prompt file gets a randomised name in a
+    // user-private subdir of the system temp dir — predictable
+    // timestamp names in `std::env::temp_dir()` were a TOCTOU /
+    // collision risk on shared systems (Gemini high-priority).
+    // `into_temp_path().keep()?` persists the path so the agent
+    // process can still read it after kata's handoff thread drops
+    // the `NamedTempFile` guard.
+    let mut tmp = tempfile::Builder::new()
+        .prefix("kata-ai-prompt-")
+        .suffix(".md")
+        .tempfile()
+        .map_err(|e| {
+            Error::Other(anyhow::Error::from(e).context("creating tmp prompt file for handoff"))
+        })?;
+    tmp.write_all(prompt_text.as_bytes()).map_err(|e| {
+        Error::Other(anyhow::Error::from(e).context("writing tmp prompt file for handoff"))
+    })?;
+    let tmp_path: PathBuf = tmp.into_temp_path().keep().map_err(|e| {
+        Error::Other(anyhow::Error::from(e).context("persisting tmp prompt file for handoff"))
+    })?;
 
     let path_str = tmp_path.to_string_lossy().into_owned();
     let dst_str = dst_hint.to_string_lossy().into_owned();
@@ -414,7 +431,10 @@ mod tests {
         {
             return;
         }
-        let err = ensure_cli_installed(Backend::Claude).unwrap_err();
+        let err = match ensure_cli_installed(Backend::Claude) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error when no AI CLI is installed"),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("not on PATH"), "unexpected error: {msg}");
         assert!(msg.contains("claude"), "missing backend name: {msg}");
