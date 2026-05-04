@@ -255,16 +255,20 @@ async fn write_and_return(
 
 /// Combine the run-wide `--ai-prompt` (when present) with the
 /// per-file manifest `prompt` so the agent sees both in one
-/// coherent instruction block. Either side may be empty; we trim
-/// blank lines so the output never starts with stray newlines.
+/// coherent instruction block. Either side may be empty or
+/// whitespace-only; both are trimmed so the output never starts /
+/// ends with stray newlines and an all-blank input collapses to
+/// `String::new()`.
 fn compose_user_prompt(run_wide: Option<&str>, per_file: Option<&str>) -> String {
-    match (run_wide, per_file) {
-        (Some(r), Some(p)) if !r.is_empty() && !p.is_empty() => {
+    let r = run_wide.map(str::trim).filter(|s| !s.is_empty());
+    let p = per_file.map(str::trim).filter(|s| !s.is_empty());
+    match (r, p) {
+        (Some(r), Some(p)) => {
             format!("[run-wide instruction]\n{r}\n\n[per-file instruction]\n{p}")
         }
-        (Some(r), _) if !r.is_empty() => r.to_string(),
-        (_, Some(p)) if !p.is_empty() => p.to_string(),
-        _ => String::new(),
+        (Some(r), None) => r.to_string(),
+        (None, Some(p)) => p.to_string(),
+        (None, None) => String::new(),
     }
 }
 
@@ -307,8 +311,21 @@ fn edit_in_editor(dst_label: &str, body: &str) -> Result<String> {
     let path = tmp.into_temp_path();
 
     // Spawn the editor with stdio inherited from the parent TTY so
-    // the user can interact with it normally.
-    let status = std::process::Command::new(&editor)
+    // the user can interact with it normally. `$EDITOR` commonly
+    // carries arguments ("code --wait", "nvim --noplugin"), so we
+    // split on whitespace and treat the first token as the
+    // executable. POSIX shells parse with quoting rules; we don't
+    // — paths with embedded spaces in `$EDITOR` need to use
+    // `$VISUAL` set to a quoted-free wrapper or a non-spaced shim.
+    let mut parts = editor.split_whitespace();
+    let prog = parts.next().ok_or_else(|| {
+        Error::Other(anyhow::anyhow!(
+            "editor command resolved to an empty string after trimming"
+        ))
+    })?;
+    let extra_args: Vec<&str> = parts.collect();
+    let status = std::process::Command::new(prog)
+        .args(&extra_args)
         .arg(path.as_os_str())
         .status()
         .map_err(|e| {
@@ -384,6 +401,19 @@ mod tests {
         assert!(
             out.contains("[per-file instruction]\nmerge CLAUDE.md"),
             "missing per-file block: {out}"
+        );
+    }
+
+    #[test]
+    fn compose_user_prompt_trims_whitespace_only_inputs_to_empty() {
+        // The docstring promises both sides are trimmed; a
+        // whitespace-only string must collapse to `None`-like
+        // behaviour so we don't emit dangling labels.
+        assert_eq!(compose_user_prompt(Some("   \n  "), None), "");
+        assert_eq!(compose_user_prompt(None, Some("\t\n")), "");
+        assert_eq!(
+            compose_user_prompt(Some("  hi  "), Some("\nbye\n")),
+            "[run-wide instruction]\nhi\n\n[per-file instruction]\nbye"
         );
     }
 }
