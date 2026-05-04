@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="kata icon">
+  <title>kata — 型</title>
+
+  <defs>
+    <linearGradient id="g-base" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d3557"/>
+      <stop offset="1" stop-color="#16243d"/>
+    </linearGradient>
+    <linearGradient id="g-mid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a9d8f"/>
+      <stop offset="1" stop-color="#1f7d72"/>
+    </linearGradient>
+    <linearGradient id="g-top" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e76f51"/>
+      <stop offset="1" stop-color="#c5523a"/>
+    </linearGradient>
+  </defs>
+
+  <!--
+    Same three-stencil compose motif as the wordmark logo, square-cropped
+    so the favicon / OG image / GitHub social card all read at small sizes.
+  -->
+  <g>
+    <rect x="14"  y="14"  width="172" height="172" rx="22" fill="url(#g-base)"/>
+    <rect x="42"  y="42"  width="172" height="172" rx="22" fill="url(#g-mid)" opacity="0.96"/>
+    <rect x="70"  y="70"  width="172" height="172" rx="22" fill="url(#g-top)" opacity="0.97"/>
+  </g>
+
+  <!--
+    型 — pressed onto the topmost stencil. Sized so it dominates the
+    16px favicon rendering while still leaving the layered edges visible.
+  -->
+  <text x="156" y="202"
+        font-family="'Noto Serif JP', 'Yu Mincho', 'Hiragino Mincho ProN', 'IPAexMincho', 'Source Han Serif JP', serif"
+        font-size="124" font-weight="700"
+        fill="#fffaf0" text-anchor="middle"
+        style="letter-spacing:0">型</text>
+</svg>
