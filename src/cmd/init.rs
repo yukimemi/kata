@@ -1,9 +1,9 @@
 //! `kata init <preset> [--at <dir>] [--var name=val]`
 //!
-//! Bootstrap a project from a local preset. Phase 1 = local sources
-//! only; remote (`github.com/...`) errors out clearly.
-
-use std::path::PathBuf;
+//! Bootstrap a project from a preset. Both **local** preset paths
+//! (`./...` / absolute) and **git** preset specs
+//! (`github.com/yukimemi/pj-presets:rust-cli`) are supported via
+//! `Preset::resolve`.
 
 use camino::Utf8PathBuf;
 
@@ -11,6 +11,7 @@ use crate::config::ProjectEntry;
 use crate::error::{Error, Result};
 use crate::preset::{Preset, PresetSpec};
 use crate::runner::{PjApplyOptions, apply_to_pj};
+use crate::template::TemplateCache;
 use crate::ui;
 
 use super::{ensure_state_dir, parse_cli_vars, resolve_pj_root};
@@ -39,23 +40,16 @@ pub async fn run(
     }
     ensure_state_dir(&pj_root)?;
 
-    // 1. Parse and resolve the preset spec (Phase 1: local only).
+    // 1. Parse the spec and resolve to (preset, base_dir). Local
+    //    preset paths read straight off disk; remote git specs
+    //    clone-on-first-use into the template cache (same slot
+    //    infrastructure as `TemplateRef`'s git source).
     let spec = PresetSpec::parse(&preset_spec)?;
-    if !spec.is_local() {
-        return Err(Error::Preset {
-            path: PathBuf::from(&preset_spec),
-            message: "Phase 1 supports local presets only (use `./...` or an absolute path)".into(),
-        });
-    }
-    let preset = Preset::resolve_local(&spec)?;
+    let cache = TemplateCache::ensure()?;
+    let (preset, base_dir) = Preset::resolve(&spec, &cache).await?;
 
-    // 2. Determine `base_dir` for resolving relative template
-    //    sources inside the preset. It's the directory the preset
-    //    file lives in.
-    let base_dir = preset_base_dir(&preset_spec, &spec)?;
-
-    // 3. Build a synthetic ProjectEntry (we don't auto-register in
-    //    Phase 1).
+    // 2. Build a synthetic ProjectEntry (we don't auto-register
+    //    yet — registry handling is Phase 2-g).
     let project = ProjectEntry {
         name: pj_root.file_name().unwrap_or("kata-project").to_string(),
         path: pj_root.clone(),
@@ -63,7 +57,7 @@ pub async fn run(
         overrides: None,
     };
 
-    // 4. Apply.
+    // 3. Apply.
     let opts = PjApplyOptions {
         dry_run: false,
         no_ai: true, // Phase 1: no AI yet
@@ -83,7 +77,7 @@ pub async fn run(
     )
     .await?;
 
-    // 5. Print outcome.
+    // 4. Print outcome.
     ui::print_pj_header(&result.project_name, pj_root.as_str(), no_color);
     for (dst, kind) in &result.actions {
         ui::print_outcome(dst, *kind, no_color);
@@ -99,21 +93,4 @@ pub async fn run(
         )));
     }
     Ok(())
-}
-
-fn preset_base_dir(spec_str: &str, spec: &PresetSpec) -> Result<Utf8PathBuf> {
-    let path = Utf8PathBuf::from(&spec.source);
-    if path.is_file() {
-        return Ok(path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| Utf8PathBuf::from(".")));
-    }
-    if path.is_dir() {
-        return Ok(path);
-    }
-    Err(Error::Preset {
-        path: spec_str.into(),
-        message: format!("local preset source `{}` does not exist", spec.source),
-    })
 }

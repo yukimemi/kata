@@ -46,10 +46,7 @@ project-specific ones.
   `.kata/applied.toml` records what was applied. The global
   registry is just paths.
 
-## Phase 1 quick start
-
-Phase 1 supports **local presets only** — point `kata init` at a
-preset file on disk:
+## Quick start
 
 ```sh
 # Build from source (not on crates.io yet)
@@ -57,14 +54,19 @@ git clone https://github.com/yukimemi/kata
 cd kata
 cargo install --path .
 
-# Apply a preset to a fresh project. Phase 1 takes a local path
-# to a preset .toml file — clone pj-presets next to your project,
-# then point at the desired preset (rust-cli.toml in this case).
-git clone https://github.com/yukimemi/pj-presets ../pj-presets
+# Apply a preset to a fresh project. Both local paths and git
+# URLs work — kata clones the preset (and its referenced
+# templates) into ~/.cache/kata/templates/ on first use.
 mkdir my-rust-cli && cd my-rust-cli
-kata init ../pj-presets/rust-cli.toml --non-interactive
 
-# Re-apply later when the templates evolve (idempotent)
+# git URL form (clones pj-presets + every template it references):
+kata init github.com/yukimemi/pj-presets:rust-cli --non-interactive
+
+# or local path form (handy when iterating on a preset locally):
+# kata init ~/src/github.com/yukimemi/pj-presets/rust-cli.toml
+
+# Re-apply later when the templates evolve (idempotent; uses the
+# cached clone — `kata update` to refresh)
 kata apply --non-interactive
 
 # Preview without writing
@@ -73,6 +75,9 @@ kata status
 # Inspect what's tracked
 kata list
 ```
+
+The `<source>:<preset-name>` syntax is the same Terraform-module-style
+spec [described in CLAUDE.md](./CLAUDE.md): `<source>[@<rev>][//<subdir>][:<preset-name>]`.
 
 ## Companion repos
 

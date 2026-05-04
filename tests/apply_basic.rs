@@ -585,15 +585,6 @@ fn init_refuses_dst_path_traversal() {
     assert!(!td.path().join("escape.txt").exists());
 }
 
-#[test]
-fn init_refuses_remote_preset_in_phase_1() {
-    let td = TempDir::new().unwrap();
-    let pj = td.path().join("demo");
-    kata(td.path())
-        .args(["init", "github.com/yukimemi/some-presets:rust-cli", "--at"])
-        .arg(&pj)
-        .arg("--non-interactive")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("local"));
-}
+// `init_refuses_remote_preset_in_phase_1` retired — Phase 2-c2
+// turned this into a supported case. End-to-end git-preset coverage
+// is in `tests/git_preset.rs`.
