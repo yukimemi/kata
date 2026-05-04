@@ -178,10 +178,30 @@ impl Manifest {
     }
 }
 
+/// Suffix that flips a template file from "literal copy" to
+/// "render through Tera". Mirrors yui's `.tera` convention so the
+/// yukimemi/* family is uniform.
+pub const TERA_SUFFIX: &str = ".tera";
+
 impl FileSpec {
-    /// Resolved destination path: `dst` if given, otherwise `src`.
+    /// True when `src` opts into Tera rendering (ends with `.tera`).
+    /// Files without the suffix are copied byte-for-byte.
+    pub fn is_tera_source(&self) -> bool {
+        self.src.ends_with(TERA_SUFFIX)
+    }
+
+    /// Resolved destination path:
+    ///   - `dst` if explicitly given
+    ///   - else `src` with a trailing `.tera` stripped (if present)
+    ///   - else `src`
     pub fn dst_or_src(&self) -> &str {
-        self.dst.as_deref().unwrap_or(&self.src)
+        if let Some(d) = &self.dst {
+            return d;
+        }
+        if let Some(stripped) = self.src.strip_suffix(TERA_SUFFIX) {
+            return stripped;
+        }
+        &self.src
     }
 }
 
@@ -204,6 +224,51 @@ mod tests {
         assert_eq!(m.files[0].how, HowMode::Overwrite);
         assert_eq!(m.files[0].when, WhenMode::Always);
         assert_eq!(m.files[0].dst_or_src(), "Makefile.toml");
+    }
+
+    fn spec(src: &str, dst: Option<&str>) -> FileSpec {
+        FileSpec {
+            src: src.into(),
+            dst: dst.map(str::to_string),
+            how: HowMode::Overwrite,
+            when: WhenMode::Always,
+            when_expr: None,
+            agent: None,
+            prompt: None,
+            marker: None,
+            paths: vec![],
+            run: None,
+        }
+    }
+
+    #[test]
+    fn dst_or_src_strips_tera_suffix_when_dst_omitted() {
+        // .tera opt-in convention: src ending in `.tera` renders
+        // through Tera and the dst loses the suffix.
+        assert_eq!(
+            spec("Makefile.toml.tera", None).dst_or_src(),
+            "Makefile.toml"
+        );
+        assert_eq!(spec(".gitignore.tera", None).dst_or_src(), ".gitignore");
+        // Without `.tera`, dst defaults to src verbatim.
+        assert_eq!(spec("ci.yml", None).dst_or_src(), "ci.yml");
+        // Explicit dst always wins; .tera is NOT auto-stripped from
+        // an explicit dst (the author asked for that exact name).
+        assert_eq!(
+            spec("a.tera", Some("custom.txt")).dst_or_src(),
+            "custom.txt"
+        );
+    }
+
+    #[test]
+    fn is_tera_source_detects_suffix() {
+        assert!(spec("Makefile.toml.tera", None).is_tera_source());
+        assert!(spec("path/to/file.tera", None).is_tera_source());
+        assert!(!spec("Makefile.toml", None).is_tera_source());
+        assert!(!spec("ci.yml", None).is_tera_source());
+        // dst doesn't influence the decision — only the source name.
+        assert!(spec("a.tera", Some("a")).is_tera_source());
+        assert!(!spec("a", Some("a.tera")).is_tera_source());
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::ai::AiAgent;
 use crate::applied::{AppliedState, AppliedTemplate};
 use crate::config::ProjectEntry;
 use crate::error::{Error, Result};
-use crate::manifest::{VarSpec, WhenMode};
+use crate::manifest::{FileSpec, VarSpec, WhenMode};
 use crate::modes::{ActionContext, OutcomeKind, for_how};
 use crate::preset::TemplateRef;
 use crate::render::{Renderer, VarResolver, VarSources, build_context};
@@ -163,7 +163,7 @@ pub async fn apply_to_pj(
                     continue;
                 }
             };
-            let rendered_body = renderer.render(&raw, &ctx)?;
+            let rendered_body = render_or_passthrough(spec, raw, &ctx, &mut renderer)?;
             let current_body = read_existing_text(dst_abs.as_path())?;
 
             let mode = for_how(spec.how);
@@ -334,7 +334,7 @@ pub async fn plan_pj(
                     continue;
                 }
             };
-            let rendered_body = renderer.render(&raw, &ctx)?;
+            let rendered_body = render_or_passthrough(spec, raw, &ctx, &mut renderer)?;
             let current_body = read_existing_text(dst_abs.as_path())?;
 
             let mode = for_how(spec.how);
@@ -357,6 +357,27 @@ pub async fn plan_pj(
         }
     }
     Ok(out)
+}
+
+/// `.tera` opt-in render: when the spec opts in via the `.tera`
+/// suffix on `src`, run the body through Tera; otherwise return
+/// the raw text unchanged. "Unchanged" here means the UTF-8 source
+/// text passes through verbatim — kata reads sources via
+/// `std::fs::read_to_string`, so binary files aren't supported in
+/// templates (tracked separately; not a Phase 1/2 concern).
+///
+/// Centralised so `apply_to_pj` and `plan_pj` cannot drift.
+fn render_or_passthrough(
+    spec: &FileSpec,
+    raw: String,
+    ctx: &tera::Context,
+    renderer: &mut Renderer,
+) -> Result<String> {
+    if spec.is_tera_source() {
+        renderer.render(&raw, ctx)
+    } else {
+        Ok(raw)
+    }
 }
 
 /// Read a file's text, distinguishing "not present" from real I/O
