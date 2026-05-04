@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::error::{Error, Result};
+use crate::manifest::ScriptSpec;
 use crate::render::Renderer;
 
 use super::{ActionContext, ActionOutcome, ActionPlan, ApplyMode, OutcomeKind, PlanKind};
@@ -25,58 +26,32 @@ pub struct Script;
 impl ApplyMode for Script {
     async fn plan(&self, ctx: &ActionContext<'_>) -> Result<ActionPlan> {
         let run = require_run(ctx)?;
+        let (cmd, args) = render_run(ctx, run)?;
         Ok(ActionPlan {
             kind: PlanKind::Update,
-            diff: Some(format!(
-                "(would run `{} {}`)",
-                run.command,
-                run.args.join(" ")
-            )),
+            diff: Some(would_run_line(&cmd, &args)),
         })
     }
 
     async fn execute(&self, ctx: &ActionContext<'_>, dry_run: bool) -> Result<ActionOutcome> {
         let run = require_run(ctx)?;
+        let (cmd, args) = render_run(ctx, run)?;
 
         if dry_run {
             return Ok(ActionOutcome {
                 kind: OutcomeKind::Skipped,
                 decision: None,
-                diff: Some(format!(
-                    "(would run `{} {}`)",
-                    run.command,
-                    run.args.join(" ")
-                )),
+                diff: Some(would_run_line(&cmd, &args)),
                 error: None,
             });
         }
 
-        // Tera-render command + args. Adds `script_*` convenience
-        // vars (mirrored from spyrun's hook helpers) so a manifest
-        // can write `args = ["{{ script_path }}"]`.
-        let mut local_ctx = ctx.tera_ctx.clone();
-        local_ctx.insert("script_path", ctx.src_abs.as_str());
-        local_ctx.insert(
-            "script_dir",
-            ctx.src_abs.parent().map(|p| p.as_str()).unwrap_or(""),
-        );
-        local_ctx.insert("script_name", ctx.src_abs.file_name().unwrap_or(""));
-        local_ctx.insert("script_stem", ctx.src_abs.file_stem().unwrap_or(""));
-        local_ctx.insert("script_ext", ctx.src_abs.extension().unwrap_or(""));
-
-        let mut renderer = Renderer::new();
-        let cmd_str = renderer.render(&run.command, &local_ctx)?;
-        let mut args = Vec::with_capacity(run.args.len());
-        for arg in &run.args {
-            args.push(renderer.render(arg, &local_ctx)?);
-        }
-
-        let output = Command::new(&cmd_str)
+        let output = Command::new(&cmd)
             .args(&args)
             .current_dir(ctx.pj_root.as_std_path())
             .output()
             .await
-            .map_err(|e| Error::Other(anyhow::anyhow!("spawn script `{cmd_str}`: {e}")))?;
+            .map_err(|e| Error::Other(anyhow::anyhow!("spawn script `{cmd}`: {e}")))?;
 
         if !output.status.success() {
             return Ok(ActionOutcome {
@@ -84,7 +59,7 @@ impl ApplyMode for Script {
                 decision: None,
                 diff: None,
                 error: Some(format!(
-                    "`{cmd_str}` exit {:?}: {}",
+                    "`{cmd}` exit {:?}: {}",
                     output.status.code(),
                     String::from_utf8_lossy(&output.stderr).trim()
                 )),
@@ -100,7 +75,40 @@ impl ApplyMode for Script {
     }
 }
 
-fn require_run<'a>(ctx: &'a ActionContext<'_>) -> Result<&'a crate::manifest::ScriptSpec> {
+/// Render the `command` and every `args` element through Tera with
+/// the standard context plus the `script_*` helpers (mirrored from
+/// spyrun's hook helpers). Shared between `plan` and `execute` so
+/// the previewed command and the actually-spawned command are
+/// guaranteed to match.
+fn render_run(ctx: &ActionContext<'_>, run: &ScriptSpec) -> Result<(String, Vec<String>)> {
+    let mut local_ctx = ctx.tera_ctx.clone();
+    local_ctx.insert("script_path", ctx.src_abs.as_str());
+    local_ctx.insert(
+        "script_dir",
+        ctx.src_abs.parent().map(|p| p.as_str()).unwrap_or(""),
+    );
+    local_ctx.insert("script_name", ctx.src_abs.file_name().unwrap_or(""));
+    local_ctx.insert("script_stem", ctx.src_abs.file_stem().unwrap_or(""));
+    local_ctx.insert("script_ext", ctx.src_abs.extension().unwrap_or(""));
+
+    let mut renderer = Renderer::new();
+    let cmd = renderer.render(&run.command, &local_ctx)?;
+    let mut args = Vec::with_capacity(run.args.len());
+    for arg in &run.args {
+        args.push(renderer.render(arg, &local_ctx)?);
+    }
+    Ok((cmd, args))
+}
+
+fn would_run_line(cmd: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        format!("(would run `{cmd}`)")
+    } else {
+        format!("(would run `{cmd} {}`)", args.join(" "))
+    }
+}
+
+fn require_run<'a>(ctx: &'a ActionContext<'_>) -> Result<&'a ScriptSpec> {
     ctx.spec.run.as_ref().ok_or_else(|| {
         Error::manifest(
             PathBuf::from(&ctx.template.source_spec),
