@@ -1,14 +1,17 @@
 //! TemplateHandle — a *resolved* template, ready to be walked and
-//! applied. For Phase 1 only local templates are loadable; the API
-//! is async to avoid churn when Git fetch lands in Phase 2.
+//! applied. Local sources resolve directly against `base_dir`; git
+//! sources go through `TemplateCache` (clone-on-first-use into
+//! `~/.cache/kata/templates/...`).
 
+pub mod cache;
 pub mod source;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+pub use cache::TemplateCache;
 pub use source::TemplateSource;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::manifest::{MANIFEST_FILE, Manifest};
 use crate::preset::TemplateRef;
 
@@ -29,17 +32,41 @@ pub struct TemplateHandle {
 }
 
 impl TemplateHandle {
-    /// Resolve a `TemplateRef` to a `TemplateHandle`. Phase 1 only
-    /// supports local sources; remote sources error early with a
-    /// clear message.
+    /// Resolve a `TemplateRef` to a `TemplateHandle`. Local sources
+    /// land directly under `base_dir`; git sources are clone-on-
+    /// first-use into `TemplateCache`. Subdir validation has already
+    /// run inside `TemplateSource::from_ref`.
     pub async fn load(t: &TemplateRef, base_dir: &Utf8Path) -> Result<Self> {
         let source = TemplateSource::from_ref(t, base_dir)?;
-        let root = source.require_local()?.to_path_buf();
+        let (root, rev) = match source {
+            TemplateSource::Local { root } => (root, "local".to_string()),
+            TemplateSource::Git {
+                url,
+                rev: rev_spec,
+                subdir,
+            } => {
+                let cache = TemplateCache::ensure()?;
+                let (slot, sha) = cache
+                    .fetch_or_clone(&url, rev_spec.as_deref())
+                    .await
+                    .map_err(|e| {
+                        // Surface the original spec in the error rather
+                        // than the normalised URL — easier to map back
+                        // to what the user / preset wrote.
+                        Error::template(t.source.clone(), e.to_string())
+                    })?;
+                let root = match subdir {
+                    Some(sub) => slot.join(sub),
+                    None => slot,
+                };
+                (root, sha)
+            }
+        };
         let manifest_path = root.join(MANIFEST_FILE);
         let manifest = Manifest::load(manifest_path.as_std_path())?;
         Ok(Self {
             source_spec: t.source.clone(),
-            rev: source.rev_label(),
+            rev,
             subdir: t.subdir.clone(),
             root,
             manifest,
@@ -50,7 +77,6 @@ impl TemplateHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Error;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -81,17 +107,9 @@ mod tests {
         assert_eq!(h.rev, "local");
     }
 
-    #[test]
-    fn errors_on_git_source() {
-        let t = TemplateRef {
-            source: "github.com/x/y".into(),
-            rev: None,
-            subdir: None,
-        };
-        let res = futures_runtime(async { TemplateHandle::load(&t, Utf8Path::new(".")).await });
-        let err = res.unwrap_err();
-        assert!(matches!(err, Error::Template { .. }));
-    }
+    // Git source loading is exercised end-to-end in
+    // `tests/git_source.rs` (it requires a real git CLI + tempdir
+    // bare-repo fixture, which is awkward inside a unit test).
 
     /// Tiny single-thread runtime for sync tests of async APIs.
     fn futures_runtime<F: std::future::Future>(f: F) -> F::Output {
