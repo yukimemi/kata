@@ -76,8 +76,18 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are kata, a multi-project template 
 /// `<kata:current>` / `<kata:incoming>` / `<kata:dst>` context
 /// blocks the agent is expected to merge.
 pub fn format_prompt(req: &AiRequest) -> String {
+    // Pre-size to "everything we'll write" + a small headroom for
+    // the static tag wrappers / closing instruction. Keeps large
+    // CLAUDE.md / ROADMAP.md merges from triggering several
+    // reallocations.
     let mut buf = String::with_capacity(
-        req.system_prompt.len() + req.user_prompt.len() + req.incoming.len() + 256,
+        req.system_prompt.len()
+            + req.user_prompt.len()
+            + req.dst.as_str().len()
+            + req.current.as_ref().map(|s| s.len()).unwrap_or(0)
+            + req.incoming.len()
+            + req.template_diff.as_ref().map(|s| s.len()).unwrap_or(0)
+            + 256,
     );
     if !req.system_prompt.is_empty() {
         buf.push_str(&req.system_prompt);
@@ -133,8 +143,16 @@ pub fn extract_body(raw: &str) -> Option<String> {
     let body = &rest[..close_off];
     // Strip exactly one leading and one trailing newline so block
     // formatting reads naturally; preserve internal whitespace.
-    let body = body.strip_prefix('\n').unwrap_or(body);
-    let body = body.strip_suffix('\n').unwrap_or(body);
+    // Handle CRLF too — Windows agents and some models emit `\r\n`
+    // and a single-byte strip would otherwise leave a stray `\r`.
+    let body = body
+        .strip_prefix("\r\n")
+        .or_else(|| body.strip_prefix('\n'))
+        .unwrap_or(body);
+    let body = body
+        .strip_suffix("\r\n")
+        .or_else(|| body.strip_suffix('\n'))
+        .unwrap_or(body);
     Some(body.to_string())
 }
 
@@ -255,6 +273,15 @@ mod tests {
             Some("line1\n\nline3"),
             "internal whitespace must round-trip",
         );
+    }
+
+    #[test]
+    fn extract_body_strips_crlf_wrappers() {
+        // Windows agents and some models wrap the tag in CRLF —
+        // a single-byte strip would leave a stray `\r` inside
+        // `body`, which is invisible but corrupts the file.
+        let raw = "<kata:body>\r\nFINAL CONTENT\r\n</kata:body>";
+        assert_eq!(extract_body(raw).as_deref(), Some("FINAL CONTENT"));
     }
 
     #[test]
