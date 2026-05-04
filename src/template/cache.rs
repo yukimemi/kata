@@ -54,7 +54,18 @@ impl TemplateCache {
         rev_spec: Option<&str>,
     ) -> Result<(Utf8PathBuf, String)> {
         let slot = self.slot(source);
-        if !slot.exists() {
+        // Treat the slot as cached only when it actually contains a
+        // git repository. A bare `slot.exists()` would happily reuse
+        // a directory left over from an interrupted clone (no
+        // `.git/` inside), causing the `git checkout` below to fail
+        // with a confusing "not a git repository". Recover by
+        // wiping and re-cloning.
+        let cached = slot.join(".git").is_dir();
+        if !cached {
+            if slot.exists() {
+                std::fs::remove_dir_all(slot.as_std_path())
+                    .map_err(|e| Error::io_at(slot.as_std_path(), e))?;
+            }
             if let Some(parent) = slot.parent() {
                 std::fs::create_dir_all(parent.as_std_path())
                     .map_err(|e| Error::io_at(parent.as_std_path(), e))?;

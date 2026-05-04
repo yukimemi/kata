@@ -12,9 +12,15 @@ use crate::error::{Error, Result};
 /// whole history so any rev (branch / tag / SHA) can be checked
 /// out later without a re-fetch. Shallow clones can be added
 /// behind a flag if first-clone latency becomes a real complaint.
+///
+/// `--` separates options from positional args so a hostile preset
+/// can't sneak `url = "--upload-pack=evil"` through and turn the
+/// shell-out into arbitrary code execution. Same trick we use for
+/// any subsequent `git` calls that take user-supplied refs.
 pub async fn clone_at(url: &str, dest: &Utf8Path) -> Result<()> {
     let output = Command::new("git")
         .arg("clone")
+        .arg("--")
         .arg(url)
         .arg(dest.as_str())
         .output()
@@ -31,7 +37,18 @@ pub async fn clone_at(url: &str, dest: &Utf8Path) -> Result<()> {
 
 /// `git checkout <rev>` inside `dir`. Suppresses git's
 /// detached-HEAD chatter so kata's own log stays clean.
+///
+/// Note: we do **not** wrap the rev in `--`. For `git checkout`
+/// specifically, `--` separates revs (left of it) from paths
+/// (right), so `git checkout -- <rev>` would try to interpret
+/// `<rev>` as a file path and fail. Defence in depth instead:
+/// refuse revs that look like CLI options up front.
 pub async fn checkout(dir: &Utf8Path, rev: &str) -> Result<()> {
+    if rev.starts_with('-') {
+        return Err(Error::Git(format!(
+            "rev `{rev}` starts with '-' (looks like a CLI option); refusing to pass to git checkout"
+        )));
+    }
     let output = Command::new("git")
         .current_dir(dir.as_std_path())
         .arg("-c")
