@@ -35,12 +35,22 @@ const CHOICES: [&str; 4] = [
 /// Run the chezmoi-style decision prompt for one `how = "ai"`
 /// file. Caller has already shown the diff, so the prompt itself
 /// stays terse.
+///
+/// `Esc` (which `inquire` reports as `OperationCanceled`) collapses
+/// to `Defer` to match the help message — bailing out of a single
+/// AI prompt should not abort the whole apply run. Ctrl-C
+/// (`OperationInterrupted`) is still a hard cancel because the user
+/// is asking the entire session to stop.
 pub fn prompt_ai_decision(dst: &str) -> Result<AiDecision> {
     let label = format!("AI proposal for {dst}:");
-    let pick = inquire::Select::new(&label, CHOICES.to_vec())
+    let pick = match inquire::Select::new(&label, CHOICES.to_vec())
         .with_help_message("\u{2191}\u{2193} to move, Enter to confirm, Esc to defer")
         .prompt()
-        .map_err(map_inquire_err)?;
+    {
+        Ok(p) => p,
+        Err(inquire::InquireError::OperationCanceled) => return Ok(AiDecision::Defer),
+        Err(e) => return Err(map_inquire_err(e)),
+    };
 
     let starts_with = |k: char| pick.starts_with(&format!("[{k}]"));
     if starts_with('a') {
@@ -53,12 +63,18 @@ pub fn prompt_ai_decision(dst: &str) -> Result<AiDecision> {
         return Ok(AiDecision::Defer);
     }
     if starts_with('c') {
-        let instr = inquire::Text::new("Refinement instruction (1 line):")
+        let instr = match inquire::Text::new("Refinement instruction (1 line):")
             .with_help_message(
                 "e.g. \"keep my custom Section X\" / \"shorter\" / \"add a note about ROADMAP\"",
             )
             .prompt()
-            .map_err(map_inquire_err)?;
+        {
+            Ok(s) => s,
+            // Esc inside the chat-instruction prompt also rolls
+            // back to Defer rather than aborting the run.
+            Err(inquire::InquireError::OperationCanceled) => return Ok(AiDecision::Defer),
+            Err(e) => return Err(map_inquire_err(e)),
+        };
         return Ok(AiDecision::Chat(instr));
     }
     // Should be unreachable given the four-element CHOICES list,

@@ -75,10 +75,14 @@ impl ApplyMode for Ai {
         };
 
         // Initial chat-turn payload. We re-build this every iteration
-        // when the user picks `[c]hat` so the agent sees its prior
-        // proposal plus the new instruction (rvpm Mode A pattern).
-        let mut user_prompt = ctx.spec.prompt.clone().unwrap_or_default();
-        let mut prior_body: Option<String> = None;
+        // when the user picks `[c]hat` so the agent sees its **most
+        // recent** proposal plus the new instruction (rvpm Mode A
+        // pattern). `prior_body` was deliberately removed: stashing
+        // the proposal across turns made Turn 2+ feed the
+        // *first-turn* body back instead of whatever the previous
+        // turn just produced (Gemini high-priority).
+        let base_prompt = ctx.spec.prompt.clone().unwrap_or_default();
+        let mut user_prompt = base_prompt.clone();
 
         for turn in 0..=MAX_CHAT_TURNS {
             let req = AiRequest {
@@ -146,15 +150,16 @@ impl ApplyMode for Ai {
                         );
                         return Ok(skipped(Decision::Defer, None));
                     }
-                    // Carry the prior proposal + new instruction
-                    // back into the next chat turn so the agent
-                    // has full context.
-                    let prev = prior_body.take().unwrap_or(body);
+                    // Carry the *latest* proposal + the new
+                    // instruction into the next chat turn. We
+                    // always reset to `base_prompt` first — never
+                    // accumulate previous refinements — so an
+                    // 8-turn session doesn't blow up the prompt
+                    // size or confuse the agent with stale
+                    // guidance.
                     user_prompt = format!(
-                        "{base}\n\n[prior AI proposal]\n{prev}\n\n[user refinement]\n{instr}",
-                        base = ctx.spec.prompt.clone().unwrap_or_default(),
+                        "{base_prompt}\n\n[prior AI proposal]\n{body}\n\n[user refinement]\n{instr}"
                     );
-                    prior_body = Some(prev);
                     continue;
                 }
             }
