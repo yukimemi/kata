@@ -63,13 +63,17 @@ pub async fn run(
         force_once: false,
     };
 
+    // Re-resolve relative template sources against the base_dir
+    // recorded at init time. Without this, `source = "../pj-base"`
+    // would be resolved against cwd and fail (Phase 1 bug B from the
+    // dogfood story).
+    let base_dir = applied.base_dir.clone().unwrap_or_else(|| cwd.clone());
+
     let result = apply_to_pj(
         project,
         pj_root.clone(),
         templates,
-        // For apply, the base_dir is irrelevant for already-absolute
-        // local sources; pass cwd for the rare relative-source case.
-        cwd,
+        base_dir,
         toml::Table::new(),
         applied.preset.clone(),
         opts,

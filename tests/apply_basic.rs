@@ -399,6 +399,69 @@ fn status_reports_create_for_uninitialised_files() {
 }
 
 #[test]
+fn apply_resolves_template_sources_relative_to_recorded_base_dir() {
+    // Reproducer for the "kata apply fails when pj isn't a sibling of
+    // templates" bug found during Phase 1 dogfood. The preset records
+    // a relative `source = "../templates/pj-base"`, and apply must
+    // resolve that against the preset's directory (recorded in
+    // applied.toml.base_dir), NOT the project's cwd.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "Makefile.toml"
+            how = "overwrite"
+            when = "always"
+            "#,
+        )
+        .file("Makefile.toml", "ok\n");
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+
+    // Place the PJ in a NESTED subdir so its parent has no `templates/`.
+    // Pre-fix, apply resolved "../templates/pj-base" against the pj's
+    // cwd → walked into `nested/inner/templates/pj-base` → not found.
+    let pj = td.path().join("nested").join("inner").join("demo");
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // applied.toml must record the resolution base.
+    let applied_body = std::fs::read_to_string(pj.join(".kata/applied.toml")).unwrap();
+    assert!(
+        applied_body.contains("base_dir"),
+        "applied.toml should record base_dir for re-resolution: {applied_body}"
+    );
+
+    // Re-apply must succeed using the recorded base_dir, not cwd.
+    kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unchanged"));
+}
+
+#[test]
 fn init_refuses_dst_path_traversal() {
     // A hostile / buggy template should NOT be able to write outside
     // the project root via `dst = "../../escape"` — defence in depth
