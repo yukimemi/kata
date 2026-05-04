@@ -1,0 +1,79 @@
+[package]
+name = "kata"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Multi-project template applier with AI-delegated merge"
+license = "MIT"
+repository = "https://github.com/yukimemi/kata"
+homepage = "https://github.com/yukimemi/kata"
+readme = "README.md"
+keywords = ["template", "scaffold", "ai", "tera", "monorepo"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "kata"
+path = "src/main.rs"
+
+[lib]
+name = "kata"
+path = "src/lib.rs"
+
+[dependencies]
+# Phase 1 will fill these in. Listed here as design-time pins so
+# we don't lose track of what's been agreed.
+
+# Async runtime + concurrency primitives (Phase 1: runtime only;
+# Phase 3: JoinSet + Semaphore are the load-bearing bits)
+# tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "sync"] }
+# async-trait = "0.1"
+
+# CLI
+# clap = { version = "4", features = ["derive", "env"] }
+# clap_complete = "4"
+
+# Templating + vars (mandatory; do not reimplement)
+# teravars = { git = "https://github.com/yukimemi/teravars" }
+# tera = "1"
+
+# Serialization
+# serde = { version = "1", features = ["derive"] }
+# serde_yaml = "0.9"
+# toml = "0.8"
+# toml_edit = "0.22"
+
+# Errors
+# thiserror = "2"
+# anyhow = "1"
+
+# Filesystem / paths
+# camino = { version = "1", features = ["serde1"] }
+# directories = "5"
+# tempfile = "3"
+
+# Time (yukimemi standard)
+# jiff = { version = "0.1", features = ["serde"] }
+
+# UI
+# inquire = "0.7"
+# indicatif = "0.17"
+# similar = "2"
+# console = "0.15"
+
+# Hashing / glob / regex
+# sha2 = "0.10"
+# globset = "0.4"
+# regex = "1"
+
+# Logging
+# tracing = "0.1"
+# tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# assert_cmd = "2"
+# predicates = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

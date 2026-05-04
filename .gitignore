@@ -1,0 +1,26 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# kata's own state (kata-on-kata bootstrap, will be re-applied)
+# Note: in regular projects .kata/applied.toml IS committed; this is
+# only ignored here because kata bootstraps itself with no kata yet.
+# Remove this line once kata is self-hosted.
+# /.kata/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# APM compiled outputs (committed for visibility once apm.yml exists)
+# Uncomment if we change strategy:
+# /.claude/skills/
+# /.gemini/skills/
+# /.github/skills/
