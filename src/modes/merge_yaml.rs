@@ -142,23 +142,25 @@ fn compute_merged(ctx: &ActionContext<'_>) -> Result<String> {
 
 /// Walk a dotted path through nested `Mapping`s and return the
 /// leaf `Value` (or `None` if any segment is missing or the parent
-/// isn't a mapping).
+/// isn't a mapping). Uses `Value::get(&str)` so we don't allocate
+/// a `Value::String` per lookup.
 fn value_at_path<'a>(val: &'a Value, path: &[&str]) -> Option<&'a Value> {
     let mut current = val;
     for seg in path {
         match current {
-            Value::Mapping(m) => current = m.get(Value::String(seg.to_string()))?,
+            Value::Mapping(_) => current = current.get(*seg)?,
             _ => return None,
         }
     }
     Some(current)
 }
 
-/// Set the value at a dotted path, creating intermediate
-/// `Mapping`s as needed. If an intermediate isn't a mapping it
-/// gets replaced with a fresh empty one (we're walking *parent*
-/// segments, so anything else here can't carry meaningful content
-/// underneath).
+/// Set the value at a dotted path, creating **missing**
+/// intermediate `Mapping`s as needed. If any intermediate slot is
+/// already occupied by something *other than* a mapping the call
+/// is a silent no-op — same conservative refuse-to-clobber
+/// contract `merge-toml::set_at_path` enforces (see PR #12
+/// for the rationale).
 fn set_at_path(val: &mut Value, path: &[&str], value: Value) {
     if path.is_empty() {
         return;
@@ -166,24 +168,25 @@ fn set_at_path(val: &mut Value, path: &[&str], value: Value) {
 
     let mut current: &mut Value = val;
     for &seg in &path[..path.len() - 1] {
-        if !matches!(current, Value::Mapping(_)) {
-            *current = Value::Mapping(Mapping::new());
+        if !current.is_mapping() {
+            return;
         }
-        let map = match current {
-            Value::Mapping(m) => m,
-            _ => unreachable!("just ensured Mapping above"),
-        };
-        let key = Value::String(seg.to_string());
-        if !map.contains_key(&key) {
-            map.insert(key.clone(), Value::Mapping(Mapping::new()));
+        let map = current.as_mapping_mut().expect("just checked is_mapping");
+        if !map.contains_key(seg) {
+            map.insert(
+                Value::String(seg.to_string()),
+                Value::Mapping(Mapping::new()),
+            );
         }
-        current = map.get_mut(&key).expect("just inserted");
+        current = map.get_mut(seg).expect("just inserted");
     }
 
-    if let Value::Mapping(m) = current {
-        let last = path.last().expect("path is non-empty");
-        m.insert(Value::String(last.to_string()), value);
+    if !current.is_mapping() {
+        return;
     }
+    let map = current.as_mapping_mut().expect("just checked is_mapping");
+    let last = path.last().expect("path is non-empty");
+    map.insert(Value::String((*last).to_string()), value);
 }
 
 fn require_paths<'a>(ctx: &'a ActionContext<'_>) -> Result<&'a Vec<String>> {
@@ -291,5 +294,19 @@ b:
         let incoming = "name: x\n";
         let merged = merge(None, incoming, &["name"]);
         assert_eq!(merged, incoming);
+    }
+
+    #[test]
+    fn merge_refuses_to_clobber_non_mapping_intermediate() {
+        // Same shape as the merge-toml refuse-to-clobber test from
+        // PR #12: existing has `package` as a scalar string. Path
+        // `package.name` would need to walk into a non-mapping —
+        // set_at_path bails out, the scalar survives.
+        let existing = "package: as-a-string\n";
+        let incoming = "package:\n  name: new\n";
+        let merged = merge(Some(existing), incoming, &["package.name"]);
+        let v: Value = serde_yaml::from_str(&merged).unwrap();
+        // `package` is still the original scalar
+        assert_eq!(v["package"], Value::String("as-a-string".into()));
     }
 }
