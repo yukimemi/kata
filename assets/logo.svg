@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 180" width="560" height="180" role="img" aria-label="kata — multi-project template applier">
+  <title>kata — 型 — multi-project template applier with AI-delegated merge</title>
+
+  <defs>
+    <!-- Subtle inner highlight on stencil corners -->
+    <linearGradient id="g-base" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d3557"/>
+      <stop offset="1" stop-color="#16243d"/>
+    </linearGradient>
+    <linearGradient id="g-mid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a9d8f"/>
+      <stop offset="1" stop-color="#1f7d72"/>
+    </linearGradient>
+    <linearGradient id="g-top" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e76f51"/>
+      <stop offset="1" stop-color="#c5523a"/>
+    </linearGradient>
+  </defs>
+
+  <!--
+    Three rectangular "stencil" layers offset down-right, evoking the
+    "compose multiple kata (templates)" core idea: pj-base, pj-rust,
+    pj-rust-cli stacking, last layer wins on overlap.
+  -->
+  <g>
+    <rect x="20" y="22" width="120" height="120" rx="14" fill="url(#g-base)"/>
+    <rect x="38" y="36" width="120" height="120" rx="14" fill="url(#g-mid)" opacity="0.96"/>
+    <rect x="56" y="50" width="120" height="120" rx="14" fill="url(#g-top)" opacity="0.97"/>
+  </g>
+
+  <!--
+    型 (kata) — centred on the topmost stencil. The CJK font fallback
+    chain works on Windows / macOS / common Linux distros without an
+    embedded font.
+  -->
+  <text x="116" y="138"
+        font-family="'Noto Serif JP', 'Yu Mincho', 'Hiragino Mincho ProN', 'IPAexMincho', 'Source Han Serif JP', serif"
+        font-size="84" font-weight="700"
+        fill="#fffaf0" text-anchor="middle"
+        style="letter-spacing:0">型</text>
+
+  <!-- Wordmark + tagline -->
+  <g transform="translate(210, 0)">
+    <text x="0" y="98"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif"
+          font-size="72" font-weight="800"
+          fill="#1d3557"
+          style="letter-spacing:-3px">kata</text>
+    <text x="2" y="128"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif"
+          font-size="15" font-weight="500"
+          fill="#52595e"
+          style="letter-spacing:0.2px">multi-project template applier · AI-delegated merge</text>
+    <text x="2" y="148"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif"
+          font-size="13" font-weight="400"
+          fill="#7a8590"
+          style="letter-spacing:0.6px">型 · the woodblock pattern, pressed onto every project</text>
+  </g>
+</svg>

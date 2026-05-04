@@ -1,4 +1,9 @@
-# kata
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/yukimemi/kata/main/assets/logo-dark.svg">
+    <img src="https://raw.githubusercontent.com/yukimemi/kata/main/assets/logo.svg" alt="kata — multi-project template applier with AI-delegated merge" width="560">
+  </picture>
+</p>
 
 > 型 — *the woodblock pattern*. A multi-project template
 > applier with AI-delegated merge for the files that resist
