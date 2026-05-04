@@ -212,7 +212,7 @@ pub async fn apply_to_pj(
         // Persist the resolution base so future `kata apply` runs can
         // re-resolve relative template sources (`../pj-base`) without
         // depending on cwd at the time of re-apply.
-        applied.base_dir = Some(base_dir.clone());
+        applied.base_dir = Some(base_dir);
         applied.templates = applied_templates;
         applied.applied_at = Some(Timestamp::now());
         applied.vars = vars;

@@ -39,7 +39,7 @@ pub async fn run(at: Option<Utf8PathBuf>, interactive: bool, no_color: bool) -> 
 
     // Same fix as cmd/apply: prefer the recorded base_dir over cwd
     // so relative template sources resolve correctly.
-    let base_dir = applied.base_dir.clone().unwrap_or_else(|| cwd.clone());
+    let base_dir = applied.base_dir.clone().unwrap_or(cwd);
 
     let plans = plan_pj(
         project,

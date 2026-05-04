@@ -67,7 +67,7 @@ pub async fn run(
     // recorded at init time. Without this, `source = "../pj-base"`
     // would be resolved against cwd and fail (Phase 1 bug B from the
     // dogfood story).
-    let base_dir = applied.base_dir.clone().unwrap_or_else(|| cwd.clone());
+    let base_dir = applied.base_dir.clone().unwrap_or(cwd);
 
     let result = apply_to_pj(
         project,
