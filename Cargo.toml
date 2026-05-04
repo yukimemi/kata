@@ -10,6 +10,12 @@ homepage = "https://github.com/yukimemi/kata"
 readme = "README.md"
 keywords = ["template", "scaffold", "ai", "tera", "monorepo"]
 categories = ["command-line-utilities", "development-tools"]
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
 
 [[bin]]
 name = "kata"
@@ -20,58 +26,54 @@ name = "kata"
 path = "src/lib.rs"
 
 [dependencies]
-# Phase 1 will fill these in. Listed here as design-time pins so
-# we don't lose track of what's been agreed.
-
-# Async runtime + concurrency primitives (Phase 1: runtime only;
-# Phase 3: JoinSet + Semaphore are the load-bearing bits)
-# tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "sync"] }
-# async-trait = "0.1"
+# Async runtime + concurrency
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "sync", "io-util"] }
+async-trait = "0.1"
 
 # CLI
-# clap = { version = "4", features = ["derive", "env"] }
-# clap_complete = "4"
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 
 # Templating + vars (mandatory; do not reimplement)
-# teravars = { git = "https://github.com/yukimemi/teravars" }
-# tera = "1"
+teravars = { version = "0.1.4", features = ["merge", "shell", "tracing"] }
+tera = "1.20"
 
 # Serialization
-# serde = { version = "1", features = ["derive"] }
-# serde_yaml = "0.9"
-# toml = "0.8"
-# toml_edit = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+toml = "1"
+toml_edit = "0.23"
 
 # Errors
-# thiserror = "2"
-# anyhow = "1"
+thiserror = "2"
+anyhow = "1"
 
 # Filesystem / paths
-# camino = { version = "1", features = ["serde1"] }
-# directories = "5"
-# tempfile = "3"
+camino = { version = "1", features = ["serde1"] }
+directories = "5"
 
-# Time (yukimemi standard)
-# jiff = { version = "0.1", features = ["serde"] }
+# Time
+jiff = { version = "0.2", features = ["serde"] }
 
 # UI
-# inquire = "0.7"
-# indicatif = "0.17"
-# similar = "2"
-# console = "0.15"
+inquire = "0.7"
+indicatif = "0.18"
+similar = "3"
+owo-colors = "4"
 
 # Hashing / glob / regex
-# sha2 = "0.10"
-# globset = "0.4"
-# regex = "1"
+sha2 = "0.11"
+globset = "0.4"
 
 # Logging
-# tracing = "0.1"
-# tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-# assert_cmd = "2"
-# predicates = "3"
+assert_cmd = "2"
+assert_fs = "1"
+predicates = "3"
+tempfile = "3"
 
 [profile.release]
 lto = true
