@@ -5,22 +5,25 @@
   </picture>
 </p>
 
-> 型 — *the woodblock pattern*. A multi-project template
-> applier with AI-delegated merge for the files that resist
-> mechanical sync.
+> 型 — *the woodblock pattern*. A multi-project template applier
+> with AI-delegated merge for the files that resist mechanical
+> sync.
 
-**Status:** pre-implementation. Design is settled in
-[CLAUDE.md](./CLAUDE.md), implementation plan in
-[ROADMAP.md](./ROADMAP.md).
+**Status: Phase 1 MVP shipped (local presets, `overwrite` mode,
+`once` / `always` timing). Not yet on crates.io. See
+[ROADMAP.md](./ROADMAP.md) for what's next (git-fetched templates,
+`merge-section` / `merge-toml` / `merge-yaml` / `script` modes,
+AI delegation, multi-PJ parallelism). Design notes in
+[CLAUDE.md](./CLAUDE.md).**
 
 ## Why
 
 Maintaining N sibling Rust / Go / Bun projects means every
 boilerplate change to `Makefile.toml` / `apm.yml` / `renri.toml`
-/ `CLAUDE.md` has to be copy-pasted across all of them. Existing
-tools (copier, cookiecutter, cruft) cover the mechanical case but
-nothing handles files that need *judgement* on update — like
-`CLAUDE.md`, where each project has shared sections plus
+/ CI / `CLAUDE.md` has to be copy-pasted across all of them.
+Existing tools (copier, cookiecutter, cruft) cover the mechanical
+case but nothing handles files that need *judgement* on update —
+like `CLAUDE.md`, where each project has shared sections plus
 project-specific ones.
 
 `kata` aims to:
@@ -42,6 +45,46 @@ project-specific ones.
 - **Truth lives with the project** — each project's
   `.kata/applied.toml` records what was applied. The global
   registry is just paths.
+
+## Phase 1 quick start
+
+Phase 1 supports **local presets only** — point `kata init` at a
+preset file on disk:
+
+```sh
+# Build from source (not on crates.io yet)
+git clone https://github.com/yukimemi/kata
+cd kata
+cargo install --path .
+
+# Apply a preset to a fresh project. Phase 1 takes a local path
+# to a preset .toml file — clone pj-presets next to your project,
+# then point at the desired preset (rust-cli.toml in this case).
+git clone https://github.com/yukimemi/pj-presets ../pj-presets
+mkdir my-rust-cli && cd my-rust-cli
+kata init ../pj-presets/rust-cli.toml --non-interactive
+
+# Re-apply later when the templates evolve (idempotent)
+kata apply --non-interactive
+
+# Preview without writing
+kata status
+
+# Inspect what's tracked
+kata list
+```
+
+## Companion repos
+
+| Repo | Role |
+|---|---|
+| [`yukimemi/pj-base`](https://github.com/yukimemi/pj-base) | Language-agnostic boilerplate (LICENSE, …) |
+| [`yukimemi/pj-rust`](https://github.com/yukimemi/pj-rust) | Rust language layer (Makefile.toml, CI matrix, rust-toolchain) |
+| [`yukimemi/pj-rust-cli`](https://github.com/yukimemi/pj-rust-cli) | Rust CLI extras (.editorconfig, …) |
+| [`yukimemi/pj-presets`](https://github.com/yukimemi/pj-presets) | Preset bundles (`rust-cli.toml`, …) |
+
+`kata` itself dogfoods these — the `Makefile.toml` / CI / etc. in
+this repo are managed by `kata apply` from `pj-presets:rust-cli`.
 
 ## License
 
