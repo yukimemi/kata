@@ -16,18 +16,29 @@
     </linearGradient>
   </defs>
 
+  <!--
+    Three rectangular "stencil" layers offset down-right, evoking the
+    "compose multiple kata (templates)" core idea: pj-base, pj-rust,
+    pj-rust-cli stacking, last layer wins on overlap.
+  -->
   <g>
     <rect x="20" y="22" width="120" height="120" rx="14" fill="url(#g-base)"/>
     <rect x="38" y="36" width="120" height="120" rx="14" fill="url(#g-mid)" opacity="0.96"/>
     <rect x="56" y="50" width="120" height="120" rx="14" fill="url(#g-top)" opacity="0.97"/>
   </g>
 
+  <!--
+    型 (kata) — centred on the topmost stencil. The CJK font fallback
+    chain works on Windows / macOS / common Linux distros without an
+    embedded font.
+  -->
   <text x="116" y="138"
         font-family="'Noto Serif JP', 'Yu Mincho', 'Hiragino Mincho ProN', 'IPAexMincho', 'Source Han Serif JP', serif"
         font-size="84" font-weight="700"
         fill="#fffaf0" text-anchor="middle"
         style="letter-spacing:0">型</text>
 
+  <!-- Wordmark + tagline -->
   <g transform="translate(210, 0)">
     <text x="0" y="98"
           font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif"
