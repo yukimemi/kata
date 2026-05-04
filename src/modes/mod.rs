@@ -4,6 +4,7 @@
 //! `Unimplemented` shim that errors clearly so the runtime can keep
 //! the trait-object dispatch shape stable.
 
+pub mod merge_section;
 pub mod overwrite;
 pub mod script;
 
@@ -19,6 +20,7 @@ use crate::error::{Error, Result};
 use crate::manifest::{FileSpec, HowMode};
 use crate::template::TemplateHandle;
 
+pub use merge_section::MergeSection;
 pub use overwrite::Overwrite;
 pub use script::Script;
 
@@ -95,9 +97,26 @@ pub trait ApplyMode: Send + Sync {
 pub fn for_how(how: HowMode) -> Box<dyn ApplyMode> {
     match how {
         HowMode::Overwrite => Box::new(Overwrite),
+        HowMode::MergeSection => Box::new(MergeSection),
         HowMode::Script => Box::new(Script),
         other => Box::new(Unimplemented(other)),
     }
+}
+
+/// Build a unified diff of `before` vs `after` using `similar`.
+/// Returned as a string with no ANSI colour (color is applied at
+/// the UI layer). Shared by `overwrite` and `merge-section` so
+/// both produce identical-shaped diff output.
+pub(crate) fn unified_diff(before: &str, after: &str, label: &str) -> String {
+    use similar::TextDiff;
+    let diff = TextDiff::from_lines(before, after);
+    let mut out = String::new();
+    out.push_str(&format!("--- {label} (current)\n"));
+    out.push_str(&format!("+++ {label} (incoming)\n"));
+    for hunk in diff.unified_diff().iter_hunks() {
+        out.push_str(&format!("{hunk}"));
+    }
+    out
 }
 
 struct Unimplemented(HowMode);
