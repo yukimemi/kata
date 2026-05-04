@@ -93,6 +93,19 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// `base_dir` is the resolution base for *relative* template
+/// sources (`./pj-base`, `..\pj-rust`). A PJ whose templates are
+/// all remote URLs or absolute paths needs no base — and recording
+/// an absolute one would only hurt portability when the file is
+/// committed.
+fn templates_need_base_dir(templates: &[AppliedTemplate]) -> bool {
+    templates.iter().any(|t| is_relative_source(&t.source))
+}
+
+fn is_relative_source(s: &str) -> bool {
+    s.starts_with("./") || s.starts_with("../") || s.starts_with(".\\") || s.starts_with("..\\")
+}
+
 impl AppliedState {
     /// Read state from `<pj_root>/.kata/applied.toml`. Returns
     /// `Default::default()` if the file does not exist (treating that
@@ -109,11 +122,24 @@ impl AppliedState {
 
     /// Write state to `<pj_root>/.kata/applied.toml`, creating the
     /// `.kata/` directory if needed.
+    ///
+    /// `base_dir` is dropped from the serialised form when none of
+    /// the recorded templates need it (i.e. every `source` is a
+    /// remote URL or an absolute local path). This keeps committed
+    /// `applied.toml` files portable across machines — only PJs that
+    /// actually use `./<rel>` template sources record an absolute
+    /// resolution base.
     pub fn save(&self, pj_root: &Utf8Path) -> Result<()> {
         let dir = pj_root.join(PJ_STATE_DIR);
         std::fs::create_dir_all(&dir).map_err(|e| Error::io_at(dir.as_std_path(), e))?;
         let path = dir.join(APPLIED_FILE);
-        let body = toml::to_string_pretty(self)
+
+        let mut view = self.clone();
+        if !templates_need_base_dir(&view.templates) {
+            view.base_dir = None;
+        }
+
+        let body = toml::to_string_pretty(&view)
             .map_err(|e| Error::applied(path.as_std_path(), e.to_string()))?;
         std::fs::write(&path, body).map_err(|e| Error::io_at(path.as_std_path(), e))
     }
@@ -181,19 +207,51 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_preserves_base_dir() {
+    fn base_dir_is_kept_when_a_template_uses_a_relative_source() {
         let td = TempDir::new().unwrap();
         let pj = Utf8PathBuf::from_path_buf(td.path().to_path_buf()).unwrap();
         let recorded_base = Utf8PathBuf::from("/abs/preset-dir");
 
-        let s = AppliedState {
+        let mut s = AppliedState {
             base_dir: Some(recorded_base.clone()),
             ..Default::default()
         };
+        s.promote_template(AppliedTemplate {
+            source: "./pj-base".into(),
+            rev: "local".into(),
+            subdir: None,
+            version: None,
+        });
         s.save(&pj).unwrap();
 
         let loaded = AppliedState::load(&pj).unwrap();
         assert_eq!(loaded.base_dir.as_ref(), Some(&recorded_base));
+    }
+
+    #[test]
+    fn base_dir_is_dropped_when_all_sources_are_remote() {
+        let td = TempDir::new().unwrap();
+        let pj = Utf8PathBuf::from_path_buf(td.path().to_path_buf()).unwrap();
+
+        let mut s = AppliedState {
+            base_dir: Some(Utf8PathBuf::from("/abs/cache/slot")),
+            ..Default::default()
+        };
+        s.promote_template(AppliedTemplate {
+            source: "github.com/yukimemi/pj-base".into(),
+            rev: "deadbeef".into(),
+            subdir: None,
+            version: None,
+        });
+        s.save(&pj).unwrap();
+
+        let loaded = AppliedState::load(&pj).unwrap();
+        assert!(
+            loaded.base_dir.is_none(),
+            "expected base_dir to be omitted from committed applied.toml \
+             when no template needs a relative-source resolution base, got {:?}",
+            loaded.base_dir
+        );
     }
 
     #[test]

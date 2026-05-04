@@ -3,6 +3,13 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# kata's own state — track the canonical applied.toml so
+# `kata apply` is reproducible from a fresh clone, but keep the rest
+# of `.kata/` (future local-only side-files like `applied.local.toml`,
+# AI transcripts, etc.) out of the repo.
+/.kata/
+!/.kata/applied.toml
+
 # Editor
 .idea/
 .vscode/
