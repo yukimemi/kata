@@ -33,6 +33,10 @@ pub struct PjApplyOptions {
     /// false by `kata apply` so once-files only fire on the first
     /// run.
     pub force_once: bool,
+    /// `--yes`: accept AI-generated bodies non-interactively. The
+    /// chezmoi-style per-file dialog (Phase 3-b3) flips this on
+    /// per-file once the user picks `[a]ccept`.
+    pub yes_all: bool,
 }
 
 #[derive(Debug)]
@@ -180,6 +184,7 @@ pub async fn apply_to_pj(
                 tera_ctx: &ctx,
                 agent: agent.clone(),
                 interactive: opts.interactive,
+                yes_all: opts.yes_all,
             };
 
             let outcome = match mode.execute(&action_ctx, opts.dry_run).await {
@@ -365,6 +370,7 @@ pub async fn plan_pj(
                 tera_ctx: &ctx,
                 agent: None,
                 interactive,
+                yes_all: false,
             };
             let plan = mode.plan(&action_ctx).await?;
             out.push((dst_rel, plan.kind, plan.diff));

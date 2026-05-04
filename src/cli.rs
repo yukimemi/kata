@@ -2,11 +2,41 @@
 
 use camino::Utf8PathBuf;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 use crate::cmd;
 use crate::error::Result;
+use crate::manifest::AgentKind;
+
+/// `--ai <BACKEND>` choices, including the `off` shortcut for
+/// `--no-ai`. Stays separate from `manifest::AgentKind` because
+/// `off` is a CLI-only state (the manifest can't request "no AI").
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum AiBackendArg {
+    /// Pick the first installed CLI in the order claude > codex >
+    /// gemini (default).
+    Auto,
+    Claude,
+    Gemini,
+    Codex,
+    /// Skip every `how = "ai"` file. Equivalent to `--no-ai`.
+    Off,
+}
+
+impl AiBackendArg {
+    /// Translate the CLI choice into the (`AgentKind`, `no_ai`)
+    /// pair the runner expects. `Off` becomes "no agent + no_ai".
+    pub fn into_runner_inputs(self) -> (AgentKind, bool) {
+        match self {
+            AiBackendArg::Auto => (AgentKind::Auto, false),
+            AiBackendArg::Claude => (AgentKind::Claude, false),
+            AiBackendArg::Gemini => (AgentKind::Gemini, false),
+            AiBackendArg::Codex => (AgentKind::Codex, false),
+            AiBackendArg::Off => (AgentKind::Auto, true),
+        }
+    }
+}
 
 /// Help-text styling — mirrored from yui so all yukimemi CLIs feel
 /// like the same family.
@@ -52,6 +82,15 @@ pub enum Command {
         /// `--var name=value` (repeatable). Highest precedence.
         #[arg(long = "var", value_name = "NAME=VAL")]
         vars: Vec<String>,
+        /// AI backend for `how = "ai"` files (auto / claude / gemini / codex / off).
+        #[arg(long, value_enum, default_value_t = AiBackendArg::Auto)]
+        ai: AiBackendArg,
+        /// Skip every `how = "ai"` file. Equivalent to `--ai off`.
+        #[arg(long, conflicts_with = "ai")]
+        no_ai: bool,
+        /// Accept AI-generated bodies non-interactively.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Re-apply this project's templates against the recorded state.
@@ -66,6 +105,15 @@ pub enum Command {
         /// `--var name=value` (repeatable).
         #[arg(long = "var", value_name = "NAME=VAL")]
         vars: Vec<String>,
+        /// AI backend for `how = "ai"` files (auto / claude / gemini / codex / off).
+        #[arg(long, value_enum, default_value_t = AiBackendArg::Auto)]
+        ai: AiBackendArg,
+        /// Skip every `how = "ai"` file. Equivalent to `--ai off`.
+        #[arg(long, conflicts_with = "ai")]
+        no_ai: bool,
+        /// Accept AI-generated bodies non-interactively.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Show what would change if `apply` were to run.
@@ -86,6 +134,15 @@ pub enum Command {
         at: Option<Utf8PathBuf>,
         #[arg(long = "var", value_name = "NAME=VAL")]
         vars: Vec<String>,
+        /// AI backend for `how = "ai"` files (auto / claude / gemini / codex / off).
+        #[arg(long, value_enum, default_value_t = AiBackendArg::Auto)]
+        ai: AiBackendArg,
+        /// Skip every `how = "ai"` file. Equivalent to `--ai off`.
+        #[arg(long, conflicts_with = "ai")]
+        no_ai: bool,
+        /// Accept AI-generated bodies non-interactively.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Drop a template from this project's applied state.
@@ -128,16 +185,42 @@ pub enum Command {
     },
 }
 
+/// Fold the `--ai <kind>` choice and the `--no-ai` shortcut into
+/// the `(AgentKind, no_ai)` pair `cmd::*::run` consumes. `--no-ai`
+/// always wins over `--ai`; clap's `conflicts_with` already keeps
+/// them from coexisting at parse time, but the helper stays
+/// defensive in case a programmatic caller bypasses that.
+fn resolve_ai_inputs(ai: AiBackendArg, no_ai: bool) -> (AgentKind, bool) {
+    let (kind, off) = ai.into_runner_inputs();
+    (kind, off || no_ai)
+}
+
 impl Cli {
     pub async fn run(self) -> Result<()> {
         let interactive = !self.non_interactive;
         let no_color = self.no_color;
         match self.command {
-            Command::Init { preset, at, vars } => {
-                cmd::init::run(preset, at, vars, interactive, no_color).await
+            Command::Init {
+                preset,
+                at,
+                vars,
+                ai,
+                no_ai,
+                yes,
+            } => {
+                let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
+                cmd::init::run(preset, at, vars, kind, no_ai, yes, interactive, no_color).await
             }
-            Command::Apply { at, dry_run, vars } => {
-                cmd::apply::run(at, dry_run, vars, interactive, no_color).await
+            Command::Apply {
+                at,
+                dry_run,
+                vars,
+                ai,
+                no_ai,
+                yes,
+            } => {
+                let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
+                cmd::apply::run(at, dry_run, vars, kind, no_ai, yes, interactive, no_color).await
             }
             Command::Status { at } => cmd::status::run(at, interactive, no_color).await,
             Command::Add {
@@ -145,7 +228,24 @@ impl Cli {
                 rev,
                 at,
                 vars,
-            } => cmd::add::run(template, rev, at, vars, interactive, no_color).await,
+                ai,
+                no_ai,
+                yes,
+            } => {
+                let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
+                cmd::add::run(
+                    template,
+                    rev,
+                    at,
+                    vars,
+                    kind,
+                    no_ai,
+                    yes,
+                    interactive,
+                    no_color,
+                )
+                .await
+            }
             Command::Remove { template, at } => cmd::remove::run(template, at, no_color).await,
             Command::Update { templates, rev, at } => {
                 cmd::update::run(templates, rev, at, no_color).await

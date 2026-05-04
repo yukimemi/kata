@@ -176,11 +176,18 @@ pub fn resolve_backend(kind: AgentKind) -> Option<Backend> {
 }
 
 /// Build a ready-to-use `AiAgent` from a manifest `AgentKind`.
-/// Returns `None` only when `kind = Auto` *and* nothing is on
-/// PATH — explicit `Claude` / `Gemini` / `Codex` always succeed
-/// here; the CLI is checked when the agent runs.
+/// Returns `None` when no usable backend resolves on PATH — both
+/// for `Auto` (the resolver walks claude > codex > gemini and
+/// finds nothing) and for an explicit `Claude` / `Gemini` /
+/// `Codex` whose CLI isn't installed. Returning `None` here lets
+/// the mode layer report a clean `Skipped` outcome with a clear
+/// hint instead of failing the whole apply run on a missing
+/// optional dependency.
 pub fn agent_for_kind(kind: AgentKind) -> Option<Arc<dyn AiAgent>> {
     let backend = resolve_backend(kind)?;
+    if !backend.is_available() {
+        return None;
+    }
     Some(Arc::new(ChatAgent::new(backend)))
 }
 
