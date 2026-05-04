@@ -17,6 +17,15 @@
 //! A path missing in the incoming body is left **untouched** in
 //! the existing file (no implicit prune; that's a deliberate
 //! conservative choice).
+//!
+//! **Path syntax limitation**: `paths` are split on the literal
+//! `.` character, so a TOML key whose own name contains a dot
+//! (e.g. the quoted form `"my.weird.key"`) is **not** addressable
+//! via this mode. The common case `dependencies.serde-derive`
+//! works fine because `-` isn't a separator. Files that need to
+//! poke into quoted dotted keys should use `merge-section`
+//! instead, or wait for a future iteration that takes a
+//! TOML-aware path parser.
 
 use std::path::PathBuf;
 
@@ -117,6 +126,9 @@ fn compute_merged(ctx: &ActionContext<'_>) -> Result<String> {
     })?;
 
     for path_str in paths {
+        // Naive `.`-split — module-level docs spell out the
+        // limitation (no TOML-quoted-key awareness). Adding a
+        // proper parser is future work.
         let segments: Vec<&str> = path_str.split('.').collect();
         if segments.iter().any(|s| s.is_empty()) {
             return Err(Error::Merge(format!(
@@ -152,9 +164,11 @@ fn item_at_path<'a>(item: &'a Item, path: &[&str]) -> Option<&'a Item> {
 }
 
 /// Set the value at a dotted path, creating intermediate
-/// `Table`s as needed. If an intermediate is something other than
-/// a table the call is a silent no-op (refuse to clobber unrelated
-/// structure); plan callers see `Unchanged` for that path.
+/// **missing** `Table`s as needed. If any intermediate slot is
+/// already occupied by something *other than* a table the call
+/// is a silent no-op — kata refuses to clobber unrelated
+/// structure to keep `merge-toml` strictly additive on the
+/// listed paths.
 fn set_at_path(doc: &mut DocumentMut, path: &[&str], value: Item) {
     if path.is_empty() {
         return;
@@ -162,12 +176,11 @@ fn set_at_path(doc: &mut DocumentMut, path: &[&str], value: Item) {
 
     let mut current: &mut Item = doc.as_item_mut();
     for &seg in &path[..path.len() - 1] {
-        // If the current slot isn't a table yet, replace it with
-        // a fresh empty table — we're walking through *parent*
-        // segments, so anything here that wasn't a table can't
-        // have valuable content beneath it that we'd lose.
+        // Refuse to overwrite a non-table intermediate. If the
+        // existing file has e.g. `package = "..."` and the path
+        // tries to reach `package.foo`, leave the file alone.
         if !current.is_table() {
-            *current = Item::Table(Table::new());
+            return;
         }
         let table = current.as_table_mut().expect("just ensured table above");
         current = table
@@ -304,5 +317,26 @@ also_keep = 88
         let incoming = "[package]\nname = \"x\"\n";
         let merged = merge(None, incoming, &["package.name"]);
         assert_eq!(merged, incoming);
+    }
+
+    #[test]
+    fn merge_refuses_to_clobber_non_table_intermediate() {
+        // `package` exists as a STRING in the existing file. The
+        // path `package.name` tries to walk into a parent that
+        // isn't a table — set_at_path must bail out, leaving the
+        // string untouched (no silent overwrite, no panic).
+        let existing = "package = \"as-a-string\"\n";
+        let incoming = "[package]\nname = \"new\"\n";
+        let merged = merge(Some(existing), incoming, &["package.name"]);
+        // existing was preserved, no clobber
+        assert!(
+            merged.contains("package = \"as-a-string\""),
+            "non-table intermediate must NOT be clobbered: {merged}"
+        );
+        // and we didn't accidentally create [package].name
+        assert!(
+            !merged.contains("[package]") && !merged.contains("name = \"new\""),
+            "no fresh [package] table should appear: {merged}"
+        );
     }
 }
