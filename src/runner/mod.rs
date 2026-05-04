@@ -163,7 +163,16 @@ pub async fn apply_to_pj(
                     continue;
                 }
             };
-            let rendered_body = renderer.render(&raw, &ctx)?;
+            // `.tera` opt-in: only files whose `src` ends with `.tera`
+            // are rendered through the Tera engine. Everything else
+            // is a literal byte-for-byte copy. Mirrors yui's
+            // convention so kata templates can carry CI YAMLs and
+            // other files with `${{ ... }}` syntax verbatim.
+            let rendered_body = if spec.is_tera_source() {
+                renderer.render(&raw, &ctx)?
+            } else {
+                raw
+            };
             let current_body = read_existing_text(dst_abs.as_path())?;
 
             let mode = for_how(spec.how);
@@ -334,7 +343,11 @@ pub async fn plan_pj(
                     continue;
                 }
             };
-            let rendered_body = renderer.render(&raw, &ctx)?;
+            let rendered_body = if spec.is_tera_source() {
+                renderer.render(&raw, &ctx)?
+            } else {
+                raw
+            };
             let current_body = read_existing_text(dst_abs.as_path())?;
 
             let mode = for_how(spec.how);

@@ -67,6 +67,9 @@ fn init_writes_files_with_vars_rendered() {
     let td = TempDir::new().unwrap();
     let templates = td.path().join("templates");
 
+    // Files containing Tera syntax must use the `.tera` suffix to opt
+    // into rendering; the suffix is stripped on the destination side
+    // unless `dst` is set explicitly.
     TemplateBuilder::new(templates.join("pj-base"))
         .manifest(
             r#"
@@ -76,22 +79,22 @@ fn init_writes_files_with_vars_rendered() {
             project = { prompt = "name?", required = true }
 
             [[file]]
-            src = "Makefile.toml"
+            src = "Makefile.toml.tera"
             how = "overwrite"
             when = "always"
 
             [[file]]
-            src = "src/main.rs"
+            src = "src/main.rs.tera"
             how = "overwrite"
             when = "once"
             "#,
         )
         .file(
-            "Makefile.toml",
+            "Makefile.toml.tera",
             "[tasks.run]\ndescription = \"run {{ vars.project }}\"\n",
         )
         .file(
-            "src/main.rs",
+            "src/main.rs.tera",
             "fn main() { println!(\"{{ vars.project }}\"); }\n",
         );
 
@@ -146,12 +149,12 @@ fn apply_is_idempotent_after_init() {
             [vars]
             project = { default = "demo" }
             [[file]]
-            src = "Makefile.toml"
+            src = "Makefile.toml.tera"
             how = "overwrite"
             when = "always"
             "#,
         )
-        .file("Makefile.toml", "name = {{ vars.project }}\n");
+        .file("Makefile.toml.tera", "name = {{ vars.project }}\n");
 
     let preset = write_preset(
         td.path(),
@@ -251,12 +254,12 @@ fn dry_run_writes_nothing() {
             [vars]
             project = { default = "demo" }
             [[file]]
-            src = "Makefile.toml"
+            src = "Makefile.toml.tera"
             how = "overwrite"
             when = "always"
             "#,
         )
-        .file("Makefile.toml", "name = {{ vars.project }}\n");
+        .file("Makefile.toml.tera", "name = {{ vars.project }}\n");
 
     let preset = write_preset(
         td.path(),
@@ -360,12 +363,12 @@ fn status_reports_create_for_uninitialised_files() {
             [vars]
             project = { default = "demo" }
             [[file]]
-            src = "Makefile.toml"
+            src = "Makefile.toml.tera"
             how = "overwrite"
             when = "always"
             "#,
         )
-        .file("Makefile.toml", "name = {{ vars.project }}\n");
+        .file("Makefile.toml.tera", "name = {{ vars.project }}\n");
 
     let preset = write_preset(
         td.path(),
@@ -459,6 +462,81 @@ fn apply_resolves_template_sources_relative_to_recorded_base_dir() {
         .assert()
         .success()
         .stdout(predicate::str::contains("unchanged"));
+}
+
+#[test]
+fn tera_opt_in_renders_only_dot_tera_files() {
+    // Pin the `.tera` opt-in convention: a file with the suffix is
+    // rendered and the suffix is stripped on dst; a sibling file
+    // *without* the suffix passes through byte-for-byte even when
+    // its body looks like Tera (`{{ ... }}` / GitHub Actions
+    // `${{ ... }}`). This is what makes ci.yml / Mustache files
+    // safe to ship in templates without `{% raw %}` wrappers.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [vars]
+            project = { default = "demo" }
+
+            # Renders: .tera suffix opts in; dst auto-strips to "rendered.txt"
+            [[file]]
+            src = "rendered.txt.tera"
+            how = "overwrite"
+            when = "always"
+
+            # Literal copy: no .tera suffix, even with Tera-looking body
+            [[file]]
+            src = "literal.yml"
+            how = "overwrite"
+            when = "always"
+            "#,
+        )
+        .file("rendered.txt.tera", "Hello, {{ vars.project }}!\n")
+        .file(
+            "literal.yml",
+            "group: ${{ github.workflow }}-{{ vars.project }}\n",
+        );
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // Rendered: vars.project substituted, .tera stripped from dst.
+    let rendered = std::fs::read_to_string(pj.join("rendered.txt")).unwrap();
+    assert_eq!(rendered, "Hello, demo!\n", "got: {rendered}");
+    assert!(
+        !pj.join("rendered.txt.tera").exists(),
+        "the .tera src should not appear at dst"
+    );
+
+    // Literal: byte-identical to source; Tera syntax untouched even
+    // though `{{ vars.project }}` would render to "demo" if it had
+    // been processed.
+    let literal = std::fs::read_to_string(pj.join("literal.yml")).unwrap();
+    assert_eq!(
+        literal, "group: ${{ github.workflow }}-{{ vars.project }}\n",
+        "literal copy must NOT process Tera syntax: {literal}"
+    );
 }
 
 #[test]

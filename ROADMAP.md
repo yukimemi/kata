@@ -34,14 +34,16 @@ The Phase 1 dogfood (kata applied to itself via local `pj-presets`)
 surfaced two issues. Tracking here so they don't get lost between
 phases.
 
-- **Render opt-out marker** (Phase 2). Template files that legitimately
-  contain `${{ ... }}` (GitHub Actions expressions, shell `${VAR:-x}`,
-  `mustache`-using files, etc.) get mis-rendered as Tera variable
-  references. Workaround today: wrap the file in
-  `{% raw %}` ... `{% endraw %}` (Tera strips the markers on render).
-  Proper fix: add a `render = false` field to `FileSpec`, and/or honour
-  a `.notera` extension that skips rendering entirely. Decide on one
-  approach and document.
+- **Render opt-out marker** ✅ *resolved in this PR* — `.tera`
+  opt-in. Files whose `src` ends with `.tera` are rendered through
+  Tera; everything else is a literal byte-for-byte copy. The dst
+  auto-strips the suffix unless `dst` is set explicitly. Mirrors
+  yui's convention so the yukimemi/* family is uniform.
+  Pinned by `tera_opt_in_renders_only_dot_tera_files` in
+  `tests/apply_basic.rs` and the `is_tera_source` /
+  `dst_or_src` unit tests in `manifest.rs`. Removes the need for
+  `{% raw %}` wrappers in templates that ship CI YAMLs / Mustache
+  files.
 - **`kata apply` resolution base** (fixed in Phase 1 follow-up PR).
   `applied.toml` now records `base_dir` so re-apply can resolve
   relative template `source` paths (`../pj-base`) against the original
