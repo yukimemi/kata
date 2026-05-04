@@ -48,6 +48,22 @@ phases.
   preset's directory rather than the PJ's cwd. The integration test
   `apply_resolves_template_sources_relative_to_recorded_base_dir`
   pins this behaviour.
+- **Portable `applied.toml`** (Phase 2). Currently `applied.toml`
+  records `preset` and `base_dir` as the absolute local paths the
+  user invoked `kata init` with — fine for solo machine but not
+  shareable, so kata's own dogfood gitignores `.kata/` for now.
+  Design options:
+    1. Split into committed `applied.toml` (portable: template specs,
+       vars, file state) + gitignored `applied.local.toml`
+       (machine-local: resolved `preset` / `base_dir`).
+    2. Strip absolute paths on save when they look local; record only
+       the spec form. `kata apply` would then require either git
+       sources (Phase 2 territory) or `--from-preset <path>` to
+       re-pin a base.
+    3. Always rewrite local paths to be PJ-relative on save (`../`
+       chains). Fragile when checkout layouts differ.
+  Bound up with the Phase 2 git-fetch work because remote sources
+  side-step the issue entirely.
 
 ## Phase 2 — "multi-template compose + git fetch + merge modes"
 

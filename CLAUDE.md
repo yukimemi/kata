@@ -126,9 +126,17 @@ existed. Flag with the user before reverting any of them.
   experience: libgit2 linking on Windows is more pain than it's
   worth). `git` CLI must exist; `kata doctor` checks.
 
-- **`.kata/applied.toml` is committed.** Teammates cloning the
-  PJ should be able to `kata apply` and reproduce the layout. The
-  cache (`~/.cache/kata/`) is NOT, naturally.
+- **`.kata/applied.toml` is committed** *— design intent.*
+  Teammates cloning the PJ should be able to `kata apply` and
+  reproduce the layout. The cache (`~/.cache/kata/`) is NOT,
+  naturally.
+  - **Phase 1 caveat**: until git-fetched templates land in Phase 2,
+    `applied.toml` records *absolute local* paths for `preset` and
+    `base_dir` (the templates literally only exist on the author's
+    machine). For now kata's own dogfood gitignores `.kata/`; the
+    moment Phase 2 makes templates portable, the field gets
+    untracked-status reverted and the design returns to plan.
+    See ROADMAP "Phase 1 follow-ups".
 
 ## Source layout (planned)
 
