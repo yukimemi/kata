@@ -1,11 +1,14 @@
 //! One file per subcommand. The dispatch table itself lives in
 //! `cli.rs` (calling `cmd::<name>::run`).
 
+pub mod add;
 pub mod apply;
 pub mod doctor;
 pub mod init;
 pub mod list;
+pub mod remove;
 pub mod status;
+pub mod update;
 
 use std::collections::BTreeMap;
 use std::env;

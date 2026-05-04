@@ -74,6 +74,43 @@ pub enum Command {
         at: Option<Utf8PathBuf>,
     },
 
+    /// Append a template to this project's applied state and apply.
+    Add {
+        /// Template spec: `<source>[@<rev>][//<subdir>]`. Same
+        /// grammar as preset templates.
+        template: String,
+        /// Pin the new template at this rev (branch / tag / SHA).
+        #[arg(long)]
+        rev: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        at: Option<Utf8PathBuf>,
+        #[arg(long = "var", value_name = "NAME=VAL")]
+        vars: Vec<String>,
+    },
+
+    /// Drop a template from this project's applied state.
+    Remove {
+        /// Template name or full source spec. Tail-segment match
+        /// also works (e.g. `kata remove pj-rust` for
+        /// `github.com/yukimemi/pj-rust`).
+        template: String,
+        #[arg(long, value_name = "DIR")]
+        at: Option<Utf8PathBuf>,
+    },
+
+    /// Refresh the cache slot for git-sourced templates and bump
+    /// recorded revs in `applied.toml`. No-op for local templates.
+    Update {
+        /// Templates to update (name or full source). Empty = all.
+        templates: Vec<String>,
+        /// Override the rev to check out (default = HEAD of
+        /// upstream's default branch).
+        #[arg(long)]
+        rev: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        at: Option<Utf8PathBuf>,
+    },
+
     /// List inventory (registered projects / template files in this
     /// PJ).
     List {
@@ -103,6 +140,16 @@ impl Cli {
                 cmd::apply::run(at, dry_run, vars, interactive, no_color).await
             }
             Command::Status { at } => cmd::status::run(at, interactive, no_color).await,
+            Command::Add {
+                template,
+                rev,
+                at,
+                vars,
+            } => cmd::add::run(template, rev, at, vars, interactive, no_color).await,
+            Command::Remove { template, at } => cmd::remove::run(template, at, no_color).await,
+            Command::Update { templates, rev, at } => {
+                cmd::update::run(templates, rev, at, no_color).await
+            }
             Command::List { at } => cmd::list::run(at, no_color),
             Command::Doctor => cmd::doctor::run(no_color),
             Command::Completion { shell } => {
