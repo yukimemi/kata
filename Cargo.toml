@@ -27,7 +27,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Async runtime + concurrency
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "sync", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "sync", "io-util", "time"] }
 async-trait = "0.1"
 
 # CLI
@@ -68,6 +68,11 @@ globset = "0.4"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# PATH resolution for AI CLI subprocesses (claude / gemini / codex …).
+# Used by `ai::process::resolve_cli` to find the agent binary on
+# Windows (PATHEXT + .ps1 fallback) the same way rvpm does.
+which = "7"
 
 [dev-dependencies]
 assert_cmd = "2"
