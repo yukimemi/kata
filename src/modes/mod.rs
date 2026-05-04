@@ -5,6 +5,7 @@
 //! the trait-object dispatch shape stable.
 
 pub mod overwrite;
+pub mod script;
 
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use crate::manifest::{FileSpec, HowMode};
 use crate::template::TemplateHandle;
 
 pub use overwrite::Overwrite;
+pub use script::Script;
 
 /// Inputs available to every `ApplyMode` invocation.
 pub struct ActionContext<'a> {
@@ -86,12 +88,14 @@ pub trait ApplyMode: Send + Sync {
     async fn execute(&self, ctx: &ActionContext<'_>, dry_run: bool) -> Result<ActionOutcome>;
 }
 
-/// Resolve a `how` value to a concrete `ApplyMode`. Phase 1 returns
-/// the working `Overwrite` impl for `Overwrite`, and an
-/// always-erroring shim for everything else.
+/// Resolve a `how` value to a concrete `ApplyMode`. As Phase 2
+/// fills in the merge / ai modes the match arms will grow; until
+/// then the not-yet-implemented variants drop through to a shim
+/// that errors with a clear message.
 pub fn for_how(how: HowMode) -> Box<dyn ApplyMode> {
     match how {
         HowMode::Overwrite => Box::new(Overwrite),
+        HowMode::Script => Box::new(Script),
         other => Box::new(Unimplemented(other)),
     }
 }
@@ -110,7 +114,7 @@ impl ApplyMode for Unimplemented {
 
 fn unimpl_err(how: HowMode) -> Error {
     Error::Other(anyhow::anyhow!(
-        "how = {:?} is not implemented yet (Phase 1 ships overwrite only)",
+        "how = {:?} is not implemented yet — see ROADMAP.md for the Phase 2 schedule",
         how
     ))
 }

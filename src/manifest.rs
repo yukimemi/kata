@@ -146,11 +146,15 @@ pub struct MarkerSpec {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScriptSpec {
+    /// Executable to spawn. Tera-rendered, so
+    /// `command = "{{ system.os == 'windows' | ternary(t='cmd', f='bash') }}"`
+    /// (or any other context-driven choice) is allowed.
     pub command: String,
+    /// Arguments. Each element is Tera-rendered with the standard
+    /// kata context plus `script_path` / `script_dir` / `script_name`
+    /// / `script_stem` / `script_ext` helpers (see modes/script.rs).
     #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default)]
-    pub shell: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

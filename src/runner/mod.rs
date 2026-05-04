@@ -191,6 +191,20 @@ pub async fn apply_to_pj(
                 }
             };
 
+            // A mode can also report failure as `Ok(ActionOutcome
+            // { kind: Failed, error: Some(_) })` — typically when
+            // the underlying error isn't a Rust `Result::Err` (a
+            // child process exiting non-zero, an AI backend
+            // returning a refusal, …). Surface those so the caller
+            // can exit non-zero and the user can see what broke.
+            if matches!(outcome.kind, OutcomeKind::Failed) {
+                let msg = outcome
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "failed (no error message)".to_string());
+                errors.push((dst_rel.clone(), msg));
+            }
+
             // Update applied state on success (skip when dry-run).
             if !opts.dry_run && matches!(outcome.kind, OutcomeKind::Wrote) {
                 let once_applied = matches!(spec.when, WhenMode::Once);
