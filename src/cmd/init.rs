@@ -7,7 +7,7 @@
 
 use camino::Utf8PathBuf;
 
-use crate::ai::agent_for_kind;
+use crate::ai::{agent_for_kind, resolve_backend};
 use crate::config::ProjectEntry;
 use crate::error::{Error, Result};
 use crate::manifest::AgentKind;
@@ -26,6 +26,7 @@ pub async fn run(
     ai_kind: AgentKind,
     no_ai: bool,
     yes: bool,
+    ai_prompt: Option<String>,
     interactive: bool,
     no_color: bool,
 ) -> Result<()> {
@@ -65,6 +66,11 @@ pub async fn run(
 
     // 3. Apply.
     let agent = if no_ai { None } else { agent_for_kind(ai_kind) };
+    let agent_backend = if no_ai {
+        None
+    } else {
+        resolve_backend(ai_kind)
+    };
     let opts = PjApplyOptions {
         dry_run: false,
         no_ai,
@@ -72,6 +78,8 @@ pub async fn run(
         cli_vars: parse_cli_vars(vars)?,
         force_once: true, // init runs once-files
         yes_all: yes,
+        ai_prompt,
+        agent_backend,
     };
     let result = apply_to_pj(
         project,

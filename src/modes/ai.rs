@@ -1,7 +1,7 @@
 //! `how = "ai"` — delegate the merge to an external agent CLI
 //! (claude / gemini / codex / opencode) via the `AiAgent` trait.
 //!
-//! Decision matrix (Phase 3-b3):
+//! Decision matrix:
 //!
 //! - `dry_run`              → Skipped + Defer  (no agent round-trip)
 //! - no agent on PATH       → Skipped + Defer + stderr hint
@@ -11,18 +11,22 @@
 //! - interactive
 //!   - run agent, show the diff, prompt with `interactive::prompt_ai_decision`:
 //!     - `[a]ccept`         → write the body
+//!     - `[e]dit`           → open the body in `$EDITOR` and write the
+//!       edited result (no further AI calls)
 //!     - `[c]hat <instr>`   → re-run with the instruction appended
-//!       and the prior proposal carried forward in the prompt history
+//!       and the latest proposal carried forward in the prompt history
+//!     - `[h]andoff`        → spawn the agent CLI interactively;
+//!       kata stops re-importing
 //!     - `[s]kip`           → Skipped + Skip
 //!     - `[d]efer`          → Skipped + Defer
 //!
-//! `[e]dit` (open `$EDITOR` on the AI body) and `[h]andoff` (spawn
-//! the agent CLI interactively, kata stops re-importing) land with
-//! Phase 3-b4.
+//! `--ai-prompt <msg>` (run-wide instruction prepended to every
+//! `how = "ai"` request) is honoured by stacking it before the
+//! manifest-author user prompt.
 
 use async_trait::async_trait;
 
-use crate::ai::{AiRequest, DEFAULT_SYSTEM_PROMPT};
+use crate::ai::{AiRequest, DEFAULT_SYSTEM_PROMPT, run_handoff};
 use crate::applied::Decision;
 use crate::error::{Error, Result};
 use crate::interactive::{AiDecision, prompt_ai_decision};
@@ -81,7 +85,12 @@ impl ApplyMode for Ai {
         // the proposal across turns made Turn 2+ feed the
         // *first-turn* body back instead of whatever the previous
         // turn just produced (Gemini high-priority).
-        let base_prompt = ctx.spec.prompt.clone().unwrap_or_default();
+        //
+        // `--ai-prompt <msg>` stacks before the manifest's `prompt`
+        // for every chat turn so the run-wide guidance survives
+        // through `[c]hat` refinements without being lost when the
+        // refinement payload is rebuilt.
+        let base_prompt = compose_user_prompt(ctx.ai_prompt, ctx.spec.prompt.as_deref());
         let mut user_prompt = base_prompt.clone();
 
         for turn in 0..=MAX_CHAT_TURNS {
@@ -135,6 +144,38 @@ impl ApplyMode for Ai {
             match prompt_ai_decision(ctx.dst_abs.as_str())? {
                 AiDecision::Accept => {
                     return write_and_return(ctx, &body, diff).await;
+                }
+                AiDecision::Edit => {
+                    let edited = edit_in_editor(ctx.dst_abs.as_str(), &body)?;
+                    if edited == body {
+                        // No-op edit: just write the original.
+                        return write_and_return(ctx, &body, diff).await;
+                    }
+                    let new_diff = unified_diff(
+                        ctx.current_body.as_deref().unwrap_or(""),
+                        &edited,
+                        ctx.dst_abs.as_str(),
+                    );
+                    return write_and_return(ctx, &edited, new_diff).await;
+                }
+                AiDecision::Handoff => {
+                    let Some(backend) = ctx.agent_backend else {
+                        return Ok(skipped(
+                            Decision::Defer,
+                            Some(
+                                "handoff requested but no resolved AI backend was available".into(),
+                            ),
+                        ));
+                    };
+                    // Hand the agent the same prompt kata would
+                    // have driven through `invoke_chat`, plus a
+                    // pointer to the destination file. After this
+                    // returns kata does NOT re-import; the agent's
+                    // own Edit / Write tools are responsible for
+                    // updating the dst.
+                    let handoff_prompt = build_handoff_prompt(&user_prompt, ctx, &body);
+                    run_handoff(backend, &handoff_prompt, ctx.dst_abs.as_std_path()).await?;
+                    return Ok(skipped(Decision::Defer, None));
                 }
                 AiDecision::Skip => {
                     return Ok(skipped(Decision::Skip, None));
@@ -210,4 +251,139 @@ async fn write_and_return(
         diff: Some(diff),
         error: None,
     })
+}
+
+/// Combine the run-wide `--ai-prompt` (when present) with the
+/// per-file manifest `prompt` so the agent sees both in one
+/// coherent instruction block. Either side may be empty; we trim
+/// blank lines so the output never starts with stray newlines.
+fn compose_user_prompt(run_wide: Option<&str>, per_file: Option<&str>) -> String {
+    match (run_wide, per_file) {
+        (Some(r), Some(p)) if !r.is_empty() && !p.is_empty() => {
+            format!("[run-wide instruction]\n{r}\n\n[per-file instruction]\n{p}")
+        }
+        (Some(r), _) if !r.is_empty() => r.to_string(),
+        (_, Some(p)) if !p.is_empty() => p.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Open the AI-proposed `body` in the user's `$EDITOR` (or
+/// `$VISUAL`) for in-place editing, then return the saved result.
+/// The temp file extension matches the destination's so editors
+/// pick the right syntax mode (e.g. `.md` for CLAUDE.md merges).
+fn edit_in_editor(dst_label: &str, body: &str) -> Result<String> {
+    use std::io::Write as _;
+
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("EDITOR").ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "notepad".to_string()
+            } else {
+                "vi".to_string()
+            }
+        });
+
+    let suffix = std::path::Path::new(dst_label)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_else(|| ".tmp".to_string());
+
+    let mut tmp = tempfile::Builder::new()
+        .prefix("kata-ai-edit-")
+        .suffix(&suffix)
+        .tempfile()
+        .map_err(|e| {
+            Error::Other(anyhow::Error::from(e).context("creating tmp file for $EDITOR"))
+        })?;
+    tmp.write_all(body.as_bytes()).map_err(|e| {
+        Error::Other(anyhow::Error::from(e).context("seeding tmp file with AI body"))
+    })?;
+    let path = tmp.into_temp_path();
+
+    // Spawn the editor with stdio inherited from the parent TTY so
+    // the user can interact with it normally.
+    let status = std::process::Command::new(&editor)
+        .arg(path.as_os_str())
+        .status()
+        .map_err(|e| {
+            Error::Other(
+                anyhow::Error::from(e).context(format!("failed to spawn editor `{editor}`")),
+            )
+        })?;
+    if !status.success() {
+        return Err(Error::Other(anyhow::anyhow!(
+            "editor `{editor}` exited with status {status} — leaving destination untouched",
+        )));
+    }
+
+    let edited = std::fs::read_to_string(&path)
+        .map_err(|e| Error::Other(anyhow::Error::from(e).context("reading edited tmp file")))?;
+    // tmp file dropped here; tempfile cleans up.
+    Ok(edited)
+}
+
+/// Build the prompt kata writes to the handoff tmp file. Stacks
+/// the assembled user prompt with the latest AI proposal so the
+/// agent has continuity even though kata's chat session ends here.
+fn build_handoff_prompt(user_prompt: &str, ctx: &ActionContext<'_>, body: &str) -> String {
+    let current = ctx.current_body.as_deref().unwrap_or("");
+    format!(
+        "{user_prompt}\n\n\
+         [destination]\n{dst}\n\n\
+         [current contents on disk]\n{current}\n\n\
+         [latest AI proposal — kata is handing this conversation off to you]\n{body}\n\n\
+         The user has chosen handoff: kata will not re-import your output. \
+         Use your own Edit / Write tools to update the destination directly.",
+        dst = ctx.dst_abs,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compose_user_prompt;
+
+    #[test]
+    fn compose_user_prompt_returns_empty_when_neither_provided() {
+        assert_eq!(compose_user_prompt(None, None), "");
+        assert_eq!(compose_user_prompt(Some(""), Some("")), "");
+    }
+
+    #[test]
+    fn compose_user_prompt_returns_only_run_wide_when_per_file_missing() {
+        assert_eq!(
+            compose_user_prompt(Some("respond in Japanese"), None),
+            "respond in Japanese"
+        );
+        assert_eq!(
+            compose_user_prompt(Some("respond in Japanese"), Some("")),
+            "respond in Japanese"
+        );
+    }
+
+    #[test]
+    fn compose_user_prompt_returns_only_per_file_when_run_wide_missing() {
+        assert_eq!(
+            compose_user_prompt(None, Some("merge CLAUDE.md")),
+            "merge CLAUDE.md"
+        );
+    }
+
+    #[test]
+    fn compose_user_prompt_combines_both_in_labelled_blocks() {
+        let out = compose_user_prompt(Some("be terse"), Some("merge CLAUDE.md"));
+        assert!(
+            out.contains("[run-wide instruction]\nbe terse"),
+            "missing run-wide block: {out}"
+        );
+        assert!(
+            out.contains("[per-file instruction]\nmerge CLAUDE.md"),
+            "missing per-file block: {out}"
+        );
+    }
 }
