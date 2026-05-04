@@ -7,20 +7,26 @@
 
 use camino::Utf8PathBuf;
 
+use crate::ai::agent_for_kind;
 use crate::applied::AppliedState;
 use crate::config::ProjectEntry;
 use crate::error::{Error, Result};
+use crate::manifest::AgentKind;
 use crate::preset::TemplateRef;
 use crate::runner::{PjApplyOptions, apply_to_pj};
 use crate::ui;
 
 use super::{parse_cli_vars, resolve_pj_root};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     template_spec: String,
     rev: Option<String>,
     at: Option<Utf8PathBuf>,
     vars: Vec<String>,
+    ai_kind: AgentKind,
+    no_ai: bool,
+    yes: bool,
     interactive: bool,
     no_color: bool,
 ) -> Result<()> {
@@ -65,7 +71,7 @@ pub async fn run(
 
     let opts = PjApplyOptions {
         dry_run: false,
-        no_ai: true,
+        no_ai,
         interactive,
         cli_vars: parse_cli_vars(vars)?,
         // The new template's `when = "once"` files are not yet in
@@ -73,8 +79,10 @@ pub async fn run(
         // recorded" check picks them up. Forcing here would also
         // re-fire the *existing* templates' once-files.
         force_once: false,
+        yes_all: yes,
     };
 
+    let agent = if no_ai { None } else { agent_for_kind(ai_kind) };
     let result = apply_to_pj(
         project,
         pj_root.clone(),
@@ -83,7 +91,7 @@ pub async fn run(
         toml::Table::new(),
         applied.preset.clone(),
         opts,
-        None,
+        agent,
     )
     .await?;
 

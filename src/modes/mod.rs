@@ -1,9 +1,9 @@
-//! `ApplyMode` — one impl per `how` value in the manifest.
-//!
-//! Phase 1 ships only `Overwrite`; the other variants resolve to an
-//! `Unimplemented` shim that errors clearly so the runtime can keep
-//! the trait-object dispatch shape stable.
+//! `ApplyMode` — one impl per `how` value in the manifest. With
+//! Phase 3-b2 every `HowMode` variant has a concrete impl, so the
+//! `for_how` dispatcher is exhaustive and no longer needs a
+//! `Unimplemented` fallback shim.
 
+pub mod ai;
 pub mod merge_section;
 pub mod merge_toml;
 pub mod merge_yaml;
@@ -18,10 +18,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::ai::AiAgent;
 use crate::applied::Decision;
 use crate::config::ProjectEntry;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::manifest::{FileSpec, HowMode};
 use crate::template::TemplateHandle;
 
+pub use ai::Ai;
 pub use merge_section::MergeSection;
 pub use merge_toml::MergeToml;
 pub use merge_yaml::MergeYaml;
@@ -47,6 +48,10 @@ pub struct ActionContext<'a> {
     /// Resolved AI agent (only meaningful for `how = "ai"`).
     pub agent: Option<Arc<dyn AiAgent>>,
     pub interactive: bool,
+    /// `--yes` accepts AI-generated bodies non-interactively. The
+    /// chezmoi-style per-file dialog (Phase 3-b3) flips this on
+    /// per-file once the user picks `[a]ccept`.
+    pub yes_all: bool,
 }
 
 /// What a mode reports during `plan` (read-only preview).
@@ -94,18 +99,17 @@ pub trait ApplyMode: Send + Sync {
     async fn execute(&self, ctx: &ActionContext<'_>, dry_run: bool) -> Result<ActionOutcome>;
 }
 
-/// Resolve a `how` value to a concrete `ApplyMode`. As Phase 2
-/// fills in the merge / ai modes the match arms will grow; until
-/// then the not-yet-implemented variants drop through to a shim
-/// that errors with a clear message.
+/// Resolve a `how` value to a concrete `ApplyMode`. Match is
+/// exhaustive — every `HowMode` variant has a working impl as of
+/// Phase 3-b2.
 pub fn for_how(how: HowMode) -> Box<dyn ApplyMode> {
     match how {
         HowMode::Overwrite => Box::new(Overwrite),
         HowMode::MergeSection => Box::new(MergeSection),
         HowMode::MergeToml => Box::new(MergeToml),
         HowMode::MergeYaml => Box::new(MergeYaml),
+        HowMode::Ai => Box::new(Ai),
         HowMode::Script => Box::new(Script),
-        other => Box::new(Unimplemented(other)),
     }
 }
 
@@ -123,23 +127,4 @@ pub(crate) fn unified_diff(before: &str, after: &str, label: &str) -> String {
         out.push_str(&format!("{hunk}"));
     }
     out
-}
-
-struct Unimplemented(HowMode);
-
-#[async_trait]
-impl ApplyMode for Unimplemented {
-    async fn plan(&self, _ctx: &ActionContext<'_>) -> Result<ActionPlan> {
-        Err(unimpl_err(self.0))
-    }
-    async fn execute(&self, _ctx: &ActionContext<'_>, _dry_run: bool) -> Result<ActionOutcome> {
-        Err(unimpl_err(self.0))
-    }
-}
-
-fn unimpl_err(how: HowMode) -> Error {
-    Error::Other(anyhow::anyhow!(
-        "how = {:?} is not implemented yet — see ROADMAP.md for the Phase 2 schedule",
-        how
-    ))
 }

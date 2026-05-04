@@ -7,8 +7,10 @@
 
 use camino::Utf8PathBuf;
 
+use crate::ai::agent_for_kind;
 use crate::config::ProjectEntry;
 use crate::error::{Error, Result};
+use crate::manifest::AgentKind;
 use crate::preset::{Preset, PresetSpec};
 use crate::runner::{PjApplyOptions, apply_to_pj};
 use crate::template::TemplateCache;
@@ -16,10 +18,14 @@ use crate::ui;
 
 use super::{ensure_state_dir, parse_cli_vars, resolve_pj_root};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     preset_spec: String,
     at: Option<Utf8PathBuf>,
     vars: Vec<String>,
+    ai_kind: AgentKind,
+    no_ai: bool,
+    yes: bool,
     interactive: bool,
     no_color: bool,
 ) -> Result<()> {
@@ -58,12 +64,14 @@ pub async fn run(
     };
 
     // 3. Apply.
+    let agent = if no_ai { None } else { agent_for_kind(ai_kind) };
     let opts = PjApplyOptions {
         dry_run: false,
-        no_ai: true, // Phase 1: no AI yet
+        no_ai,
         interactive,
         cli_vars: parse_cli_vars(vars)?,
         force_once: true, // init runs once-files
+        yes_all: yes,
     };
     let result = apply_to_pj(
         project,
@@ -73,7 +81,7 @@ pub async fn run(
         preset.vars.clone(),
         Some(preset_spec),
         opts,
-        None,
+        agent,
     )
     .await?;
 

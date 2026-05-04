@@ -41,7 +41,12 @@ pub struct AiRequest {
     pub template_diff: Option<String>,
     /// Destination path (passed to the agent for context).
     pub dst: Utf8PathBuf,
-    pub timeout_secs: u64,
+    // No per-request `timeout_secs`: the chat-turn timeout is owned
+    // by `process::invoke_chat` and configured globally via
+    // `KATA_AI_TIMEOUT_SECS` (default 300s). A field here would have
+    // to be honoured by every concrete `AiAgent` impl, and
+    // `ChatAgent::run` would silently ignore it. Re-introduce the
+    // override the day a backend genuinely needs per-call timeouts.
 }
 
 #[derive(Debug, Clone)]
