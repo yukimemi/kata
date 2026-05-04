@@ -5,7 +5,9 @@ use async_trait::async_trait;
 
 use crate::error::{Error, Result};
 
-use super::{ActionContext, ActionOutcome, ActionPlan, ApplyMode, OutcomeKind, PlanKind};
+use super::{
+    ActionContext, ActionOutcome, ActionPlan, ApplyMode, OutcomeKind, PlanKind, unified_diff,
+};
 
 pub struct Overwrite;
 
@@ -71,19 +73,4 @@ impl ApplyMode for Overwrite {
             }
         }
     }
-}
-
-/// Build a unified diff of `before` vs `after` using `similar`.
-/// Returned as a string with no ANSI colour (color is applied at the
-/// UI layer).
-fn unified_diff(before: &str, after: &str, label: &str) -> String {
-    use similar::TextDiff;
-    let diff = TextDiff::from_lines(before, after);
-    let mut out = String::new();
-    out.push_str(&format!("--- {label} (current)\n"));
-    out.push_str(&format!("+++ {label} (incoming)\n"));
-    for hunk in diff.unified_diff().iter_hunks() {
-        out.push_str(&format!("{}", hunk));
-    }
-    out
 }
