@@ -61,18 +61,36 @@ pub async fn run(
         let slot = cache.slot(&url);
 
         // Make sure the slot is a real git repo; otherwise (re-)clone.
+        // Per-template failures push a FAIL line and continue so a
+        // single broken upstream doesn't abort the whole run.
         if !slot.join(".git").is_dir() {
             if let Some(parent) = slot.parent() {
-                std::fs::create_dir_all(parent.as_std_path())
-                    .map_err(|e| Error::io_at(parent.as_std_path(), e))?;
+                if let Err(e) = std::fs::create_dir_all(parent.as_std_path()) {
+                    report.push(format!("FAIL {}: mkdir {parent}: {e}", tmpl.source));
+                    continue;
+                }
             }
             if slot.exists() {
-                std::fs::remove_dir_all(slot.as_std_path())
-                    .map_err(|e| Error::io_at(slot.as_std_path(), e))?;
+                let is_dir = std::fs::symlink_metadata(slot.as_std_path())
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false);
+                let rm = if is_dir {
+                    std::fs::remove_dir_all(slot.as_std_path())
+                } else {
+                    std::fs::remove_file(slot.as_std_path())
+                };
+                if let Err(e) = rm {
+                    report.push(format!("FAIL {}: clean {slot}: {e}", tmpl.source));
+                    continue;
+                }
             }
-            git::clone_at(&url, slot.as_path()).await?;
-        } else {
-            git::fetch(slot.as_path()).await?;
+            if let Err(e) = git::clone_at(&url, slot.as_path()).await {
+                report.push(format!("FAIL {}: clone: {e}", tmpl.source));
+                continue;
+            }
+        } else if let Err(e) = git::fetch(slot.as_path()).await {
+            report.push(format!("FAIL {}: fetch: {e}", tmpl.source));
+            continue;
         }
 
         // Resolve the requested rev (or just take HEAD's fresh value
@@ -118,13 +136,22 @@ pub async fn run(
 }
 
 fn is_local_source(s: &str) -> bool {
-    s.starts_with("./") || s.starts_with("../") || s.starts_with('/') || {
-        let bytes = s.as_bytes();
-        bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && (bytes[2] == b'/' || bytes[2] == b'\\')
+    // POSIX-style relative / absolute paths.
+    if s.starts_with("./") || s.starts_with("../") || s.starts_with('/') {
+        return true;
     }
+    // Windows backslash variants: relative (`.\`, `..\`), drive root
+    // (`\foo`), UNC share (`\\server\share`) and verbatim
+    // (`\\?\C:\...`).
+    if s.starts_with(".\\") || s.starts_with("..\\") || s.starts_with('\\') {
+        return true;
+    }
+    // Windows drive-qualified absolute path: `C:/...` or `C:\...`.
+    let bytes = s.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
 fn short_sha(s: &str) -> String {

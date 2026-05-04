@@ -23,20 +23,38 @@ pub async fn run(template_name: String, at: Option<Utf8PathBuf>, no_color: bool)
     })?;
 
     let mut applied = AppliedState::load(&pj_root)?;
-    let before = applied.templates.len();
 
     // Match against full source spec OR the trailing path/name
     // segment so users can write `kata remove pj-rust` instead of
-    // the full `github.com/yukimemi/pj-rust` URL.
+    // the full `github.com/yukimemi/pj-rust` URL. If the short name
+    // is ambiguous (multiple templates share the same trailing
+    // segment), refuse — silently dropping all of them is worse
+    // than asking for the full source spec.
+    let matches: Vec<String> = applied
+        .templates
+        .iter()
+        .filter(|t| template_matches(&t.source, &template_name))
+        .map(|t| t.source.clone())
+        .collect();
+
+    match matches.len() {
+        0 => {
+            return Err(Error::Config(format!(
+                "template `{template_name}` is not applied to this project; nothing to remove"
+            )));
+        }
+        1 => {}
+        _ => {
+            let listed = matches.join(", ");
+            return Err(Error::Config(format!(
+                "template `{template_name}` is ambiguous — matches: {listed}. Pass the full source spec."
+            )));
+        }
+    }
+
     applied
         .templates
         .retain(|t| !template_matches(&t.source, &template_name));
-
-    if applied.templates.len() == before {
-        return Err(Error::Config(format!(
-            "template `{template_name}` is not applied to this project; nothing to remove"
-        )));
-    }
 
     applied.save(&pj_root)?;
     println!(

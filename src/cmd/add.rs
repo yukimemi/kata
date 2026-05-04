@@ -68,9 +68,11 @@ pub async fn run(
         no_ai: true,
         interactive,
         cli_vars: parse_cli_vars(vars)?,
-        // The newly-added template's `when = "once"` files are
-        // brand-new to this PJ, so they should fire on add.
-        force_once: true,
+        // The new template's `when = "once"` files are not yet in
+        // `applied.toml.files`, so the standard "once = fire if not
+        // recorded" check picks them up. Forcing here would also
+        // re-fire the *existing* templates' once-files.
+        force_once: false,
     };
 
     let result = apply_to_pj(
