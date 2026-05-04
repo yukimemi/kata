@@ -49,6 +49,30 @@ exec chmod +x ${hook_file}
 echo "Installed pre-push hook -> ${hook_file}"
 '''
 
+[tasks.apm-install]
+description = "Install agent skills declared in apm.yml (Copilot / Claude / Gemini targets). Requires the APM CLI on PATH — see https://github.com/microsoft/apm. Skipped silently when apm.yml is absent."
+script_runner = "@duckscript"
+script = '''
+exists = is_path_exists "apm.yml"
+if not ${exists}
+    echo "no apm.yml; skipping apm-install"
+    exit 0
+end
+exec apm install -t copilot,claude,gemini
+'''
+
+[tasks.apm-install-update]
+description = "Refresh APM dependencies to upstream latest. Skipped silently when apm.yml is absent."
+script_runner = "@duckscript"
+script = '''
+exists = is_path_exists "apm.yml"
+if not ${exists}
+    echo "no apm.yml; skipping apm-install-update"
+    exit 0
+end
+exec apm install --update -t copilot,claude,gemini
+'''
+
 [tasks.setup]
-description = "One-time setup for new contributors: pre-push hook"
-dependencies = ["hook-install"]
+description = "One-time setup for new contributors: pre-push hook + APM install"
+dependencies = ["hook-install", "apm-install"]
