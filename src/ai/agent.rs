@@ -216,7 +216,6 @@ mod tests {
             incoming: incoming.to_string(),
             template_diff: None,
             dst: Utf8PathBuf::from("CLAUDE.md"),
-            timeout_secs: 300,
         }
     }
 

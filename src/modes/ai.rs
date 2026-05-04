@@ -20,10 +20,6 @@ use super::{
     ActionContext, ActionOutcome, ActionPlan, ApplyMode, OutcomeKind, PlanKind, unified_diff,
 };
 
-/// Default per-chat-turn timeout. Mirrors the env-overridable
-/// `KATA_AI_TIMEOUT_SECS` consumed by `ai::process::invoke_chat`.
-const DEFAULT_TIMEOUT_SECS: u64 = 300;
-
 pub struct Ai;
 
 #[async_trait]
@@ -69,16 +65,22 @@ impl ApplyMode for Ai {
         // include `--no-ai`, the `auto` resolver finding nothing
         // on PATH, or an explicit `agent = "claude"` whose CLI
         // isn't installed (which the runner detects and drops).
+        //
+        // Print the hint to stderr too: the runner only collects
+        // `error` messages on `Failed` outcomes (and we don't want
+        // to flip this to `Failed`, since a missing optional CLI
+        // mustn't abort the rest of the apply run), so without
+        // this line the user would see a silent "skipped" with no
+        // explanation in the end-of-run report.
         let Some(agent) = ctx.agent.clone() else {
+            const HINT: &str = "no AI agent available (try `--ai claude` / install one of \
+                claude / codex / gemini, or pass `--no-ai`)";
+            eprintln!("  ai skip {}: {HINT}", ctx.dst_abs);
             return Ok(ActionOutcome {
                 kind: OutcomeKind::Skipped,
                 decision: Some(Decision::Defer),
                 diff: None,
-                error: Some(
-                    "no AI agent available (try `--ai claude` / install one of \
-                     claude / codex / gemini, or pass `--no-ai`)"
-                        .into(),
-                ),
+                error: Some(HINT.into()),
             });
         };
 
@@ -94,7 +96,6 @@ impl ApplyMode for Ai {
             incoming: ctx.rendered_body.clone(),
             template_diff: None,
             dst: ctx.dst_abs.clone(),
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
         };
 
         let response = agent.run(req).await?;

@@ -151,7 +151,7 @@ source = "{}"
         .args(["--ai", "claude", "--yes"]);
     cmd.assert()
         .success()
-        .stderr(predicate::str::contains("no AI agent available").or(predicate::str::is_empty()));
+        .stderr(predicate::str::contains("no AI agent available"));
 
     assert!(
         !pj.join("CLAUDE.md").exists(),
