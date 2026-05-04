@@ -27,7 +27,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Async runtime + concurrency
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "sync", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "sync", "io-util", "time"] }
 async-trait = "0.1"
 
 # CLI
@@ -69,11 +69,20 @@ globset = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# PATH resolution for AI CLI subprocesses (claude / gemini / codex …).
+# Used by `ai::process::resolve_cli` to find the agent binary on
+# Windows (PATHEXT + .ps1 fallback) the same way rvpm does.
+which = "7"
+
+# Secure tmp file allocation for the AI handoff prompt — must live
+# in [dependencies] (not just [dev-dependencies]) because
+# `ai::process::run_handoff` writes the prompt file at runtime.
+tempfile = "3"
+
 [dev-dependencies]
 assert_cmd = "2"
 assert_fs = "1"
 predicates = "3"
-tempfile = "3"
 
 [profile.release]
 lto = true

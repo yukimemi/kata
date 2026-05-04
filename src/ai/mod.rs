@@ -1,13 +1,26 @@
-//! AI agent abstraction. Phase 1 ships only the trait + types so
-//! the rest of the runtime can pass `Option<Arc<dyn AiAgent>>` around
-//! without conditional compilation. Concrete `claude` / `gemini` /
-//! `codex` backends arrive in Phase 3.
+//! AI agent abstraction.
+//!
+//! - **Trait + DTOs** (`AiAgent`, `AiRequest`, `AiResponse`) are
+//!   the contract `modes/ai.rs` calls into.
+//! - **`process` submodule** is the low-level subprocess plumbing
+//!   shared by every concrete backend: `Backend`, `resolve_cli`,
+//!   `invoke_chat` (one chat turn), `run_handoff` (escape hatch
+//!   to interactive mode).
+//!
+//! Phase 3-a ships only the trait + the subprocess plumbing.
+//! Concrete `claude` / `gemini` / `codex` impls of `AiAgent` and
+//! the chezmoi-style per-file UI come with Phase 3-b.
+
+pub mod process;
 
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
 
 use crate::error::Result;
 pub use crate::manifest::AgentKind;
+pub use process::{
+    Backend, ResolvedCli, ensure_cli_installed, invoke_chat, resolve_cli, run_handoff,
+};
 
 #[derive(Debug, Clone)]
 pub struct AiRequest {
