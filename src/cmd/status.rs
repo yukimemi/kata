@@ -37,11 +37,15 @@ pub async fn run(at: Option<Utf8PathBuf>, interactive: bool, no_color: bool) -> 
         overrides: None,
     };
 
+    // Same fix as cmd/apply: prefer the recorded base_dir over cwd
+    // so relative template sources resolve correctly.
+    let base_dir = applied.base_dir.clone().unwrap_or(cwd);
+
     let plans = plan_pj(
         project,
         pj_root.clone(),
         templates,
-        cwd,
+        base_dir,
         toml::Table::new(),
         interactive,
         Default::default(),

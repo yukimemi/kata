@@ -28,6 +28,27 @@ Done when: a Local fixture template can be `kata init`'d into a
 fresh directory, vars get prompted (or `KATA_VAR_*`-injected),
 files land, `.kata/applied.toml` exists, `kata apply` is a no-op.
 
+## Phase 1 follow-ups (post-merge findings from dogfood)
+
+The Phase 1 dogfood (kata applied to itself via local `pj-presets`)
+surfaced two issues. Tracking here so they don't get lost between
+phases.
+
+- **Render opt-out marker** (Phase 2). Template files that legitimately
+  contain `${{ ... }}` (GitHub Actions expressions, shell `${VAR:-x}`,
+  `mustache`-using files, etc.) get mis-rendered as Tera variable
+  references. Workaround today: wrap the file in
+  `{% raw %}` ... `{% endraw %}` (Tera strips the markers on render).
+  Proper fix: add a `render = false` field to `FileSpec`, and/or honour
+  a `.notera` extension that skips rendering entirely. Decide on one
+  approach and document.
+- **`kata apply` resolution base** (fixed in Phase 1 follow-up PR).
+  `applied.toml` now records `base_dir` so re-apply can resolve
+  relative template `source` paths (`../pj-base`) against the original
+  preset's directory rather than the PJ's cwd. The integration test
+  `apply_resolves_template_sources_relative_to_recorded_base_dir`
+  pins this behaviour.
+
 ## Phase 2 — "multi-template compose + git fetch + merge modes"
 
 Resilience principle + structural mergers. After this phase kata

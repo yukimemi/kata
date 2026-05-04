@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -17,6 +17,15 @@ pub struct AppliedState {
     /// Format: `<source>[@<rev>][//<subdir>][:<preset-name>]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
+
+    /// Absolute directory used as the resolution base for any
+    /// **relative** template `source` paths recorded below. Set by
+    /// `kata init` to the directory of the preset file (so e.g.
+    /// `source = "../pj-base"` resolves correctly when `kata apply`
+    /// re-runs from a totally different cwd). When absent, callers
+    /// fall back to the current working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_dir: Option<Utf8PathBuf>,
 
     /// Templates applied in compose order (last wins on file
     /// conflicts).
@@ -168,6 +177,23 @@ mod tests {
         let s = AppliedState::load(&pj).unwrap();
         assert!(s.templates.is_empty());
         assert!(s.preset.is_none());
+        assert!(s.base_dir.is_none());
+    }
+
+    #[test]
+    fn round_trip_preserves_base_dir() {
+        let td = TempDir::new().unwrap();
+        let pj = Utf8PathBuf::from_path_buf(td.path().to_path_buf()).unwrap();
+        let recorded_base = Utf8PathBuf::from("/abs/preset-dir");
+
+        let s = AppliedState {
+            base_dir: Some(recorded_base.clone()),
+            ..Default::default()
+        };
+        s.save(&pj).unwrap();
+
+        let loaded = AppliedState::load(&pj).unwrap();
+        assert_eq!(loaded.base_dir.as_ref(), Some(&recorded_base));
     }
 
     #[test]
