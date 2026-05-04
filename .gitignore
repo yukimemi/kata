@@ -3,6 +3,14 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# kata's own state
+# Phase 1 dogfood: `.kata/applied.toml` records the local preset
+# path the author ran `kata init` with — not portable across
+# machines yet. Tracked-status returns once Phase 2 ships
+# git-fetched templates and the portability follow-up in
+# ROADMAP "Phase 1 follow-ups".
+/.kata/
+
 # Editor
 .idea/
 .vscode/

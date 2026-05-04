@@ -44,6 +44,8 @@ hook_file = set "${hook_dir}/pre-push"
 mkdir ${hook_dir}
 hook_content = set "#!/bin/sh\n# Installed by: cargo make hook-install\ncargo make check"
 writefile ${hook_file} ${hook_content}
+# Unix needs the exec bit; on Windows chmod is a no-op via Git for Windows / busybox.
+exec chmod +x ${hook_file}
 echo "Installed pre-push hook -> ${hook_file}"
 '''
 
