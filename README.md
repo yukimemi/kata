@@ -57,10 +57,12 @@ git clone https://github.com/yukimemi/kata
 cd kata
 cargo install --path .
 
-# Apply a preset to a fresh project
+# Apply a preset to a fresh project. Phase 1 takes a local path
+# to a preset .toml file — clone pj-presets next to your project,
+# then point at the desired preset (rust-cli.toml in this case).
+git clone https://github.com/yukimemi/pj-presets ../pj-presets
 mkdir my-rust-cli && cd my-rust-cli
-kata init ~/src/github.com/yukimemi/pj-presets/rust-cli.toml \
-  --non-interactive
+kata init ../pj-presets/rust-cli.toml --non-interactive
 
 # Re-apply later when the templates evolve (idempotent)
 kata apply --non-interactive

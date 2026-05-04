@@ -50,7 +50,7 @@ echo "Installed pre-push hook -> ${hook_file}"
 '''
 
 [tasks.apm-install]
-description = "Install agent skills declared in apm.yml (Copilot / Claude / Gemini targets). Requires the APM CLI on PATH — see https://github.com/microsoft/apm. Skipped silently when apm.yml is absent."
+description = "Install agent skills declared in apm.yml (Copilot / Claude / Gemini targets). Skipped silently when apm.yml or the apm CLI is absent."
 script_runner = "@duckscript"
 script = '''
 exists = is_path_exists "apm.yml"
@@ -58,16 +58,26 @@ if not ${exists}
     echo "no apm.yml; skipping apm-install"
     exit 0
 end
+apm_path = which apm
+if is_empty ${apm_path}
+    echo "apm CLI not on PATH; skipping apm-install (install via aka.ms/apm-unix or your platform's package manager)"
+    exit 0
+end
 exec apm install -t copilot,claude,gemini
 '''
 
 [tasks.apm-install-update]
-description = "Refresh APM dependencies to upstream latest. Skipped silently when apm.yml is absent."
+description = "Refresh APM dependencies to upstream latest. Skipped silently when apm.yml or the apm CLI is absent."
 script_runner = "@duckscript"
 script = '''
 exists = is_path_exists "apm.yml"
 if not ${exists}
     echo "no apm.yml; skipping apm-install-update"
+    exit 0
+end
+apm_path = which apm
+if is_empty ${apm_path}
+    echo "apm CLI not on PATH; skipping apm-install-update (install via aka.ms/apm-unix or your platform's package manager)"
     exit 0
 end
 exec apm install --update -t copilot,claude,gemini
