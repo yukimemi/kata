@@ -35,6 +35,26 @@ pub async fn clone_at(url: &str, dest: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
+/// `git fetch --prune` inside `dir` to pull new commits + delete
+/// stale remote-tracking refs. Used by `kata update` to refresh
+/// the cache slot before re-checking out.
+pub async fn fetch(dir: &Utf8Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(dir.as_std_path())
+        .arg("fetch")
+        .arg("--prune")
+        .output()
+        .await
+        .map_err(|e| Error::Git(format!("spawn `git fetch`: {e}")))?;
+    if !output.status.success() {
+        return Err(Error::Git(format!(
+            "git fetch in {dir}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 /// `git checkout <rev>` inside `dir`. Suppresses git's
 /// detached-HEAD chatter so kata's own log stays clean.
 ///
