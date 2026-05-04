@@ -5,6 +5,7 @@
 //! the trait-object dispatch shape stable.
 
 pub mod merge_section;
+pub mod merge_toml;
 pub mod overwrite;
 pub mod script;
 
@@ -21,6 +22,7 @@ use crate::manifest::{FileSpec, HowMode};
 use crate::template::TemplateHandle;
 
 pub use merge_section::MergeSection;
+pub use merge_toml::MergeToml;
 pub use overwrite::Overwrite;
 pub use script::Script;
 
@@ -98,6 +100,7 @@ pub fn for_how(how: HowMode) -> Box<dyn ApplyMode> {
     match how {
         HowMode::Overwrite => Box::new(Overwrite),
         HowMode::MergeSection => Box::new(MergeSection),
+        HowMode::MergeToml => Box::new(MergeToml),
         HowMode::Script => Box::new(Script),
         other => Box::new(Unimplemented(other)),
     }
