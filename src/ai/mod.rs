@@ -7,10 +7,13 @@
 //!   `invoke_chat` (one chat turn), `run_handoff` (escape hatch
 //!   to interactive mode).
 //!
-//! Phase 3-a ships only the trait + the subprocess plumbing.
-//! Concrete `claude` / `gemini` / `codex` impls of `AiAgent` and
-//! the chezmoi-style per-file UI come with Phase 3-b.
+//! Phase 3-a shipped the trait + the subprocess plumbing. Phase
+//! 3-b1 layers the concrete `ChatAgent` (one struct, picks its
+//! backend at construction time), the auto-resolver, the prompt
+//! builder, and the body extractor on top. The chezmoi-style
+//! per-file UI lands with Phase 3-b3.
 
+pub mod agent;
 pub mod process;
 
 use async_trait::async_trait;
@@ -18,6 +21,10 @@ use camino::Utf8PathBuf;
 
 use crate::error::Result;
 pub use crate::manifest::AgentKind;
+pub use agent::{
+    ChatAgent, DEFAULT_SYSTEM_PROMPT, agent_for_kind, ensure_agent_available, extract_body,
+    format_prompt, resolve_backend,
+};
 pub use process::{
     Backend, ResolvedCli, ensure_cli_installed, invoke_chat, resolve_cli, run_handoff,
 };
