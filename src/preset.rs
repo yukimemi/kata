@@ -20,7 +20,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::template::{TemplateCache, source::normalise_git_url};
+use crate::template::{
+    TemplateCache,
+    source::{escapes_via_parent, normalise_git_url},
+};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Preset {
@@ -90,6 +93,25 @@ impl PresetSpec {
                 path: PathBuf::from("<spec>"),
                 message: format!("preset source missing in {s:?}"),
             });
+        }
+
+        // Refuse a `subdir` that would escape the source root before
+        // we ever shell out to `git clone` — same security check
+        // `TemplateSource::from_ref` enforces on the template side.
+        if let Some(sub) = subdir {
+            let sub_path = Utf8Path::new(sub);
+            if sub_path.is_absolute() {
+                return Err(Error::Preset {
+                    path: PathBuf::from("<spec>"),
+                    message: format!("preset subdir `{sub}` must be relative, not absolute"),
+                });
+            }
+            if escapes_via_parent(sub_path) {
+                return Err(Error::Preset {
+                    path: PathBuf::from("<spec>"),
+                    message: format!("preset subdir `{sub}` escapes the source root via `..`"),
+                });
+            }
         }
 
         Ok(Self {
@@ -356,6 +378,29 @@ mod tests {
     fn rejects_empty() {
         assert!(PresetSpec::parse("").is_err());
         assert!(PresetSpec::parse("   ").is_err());
+    }
+
+    #[test]
+    fn rejects_subdir_with_parent_traversal() {
+        // Defence in depth: refuse a subdir that would escape the
+        // cloned source root before any I/O. Same security check
+        // TemplateSource::from_ref enforces on the template side.
+        let err = PresetSpec::parse("github.com/x/y//../../escape:rust-cli").unwrap_err();
+        assert!(matches!(err, Error::Preset { .. }));
+    }
+
+    #[test]
+    fn rejects_absolute_subdir() {
+        let err = PresetSpec::parse("github.com/x/y///etc/passwd:rust-cli").unwrap_err();
+        assert!(matches!(err, Error::Preset { .. }));
+    }
+
+    #[test]
+    fn accepts_safe_nested_subdir() {
+        // Sanity: the validator doesn't false-positive on legitimate
+        // nested subdirs.
+        let s = PresetSpec::parse("github.com/x/y//presets/rust:rust-cli").unwrap();
+        assert_eq!(s.subdir.as_deref(), Some("presets/rust"));
     }
 
     #[test]
