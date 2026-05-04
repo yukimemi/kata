@@ -89,6 +89,11 @@ impl ApplyMode for MergeSection {
                 })
             }
             ComposeResult::Create(new_body) | ComposeResult::Update { new_body, .. } => {
+                let diff = unified_diff(
+                    ctx.current_body.as_deref().unwrap_or(""),
+                    &new_body,
+                    ctx.dst_abs.as_str(),
+                );
                 if let Some(parent) = ctx.dst_abs.parent() {
                     tokio::fs::create_dir_all(parent.as_std_path())
                         .await
@@ -97,10 +102,12 @@ impl ApplyMode for MergeSection {
                 tokio::fs::write(ctx.dst_abs.as_std_path(), &new_body)
                     .await
                     .map_err(|e| Error::io_at(ctx.dst_abs.as_std_path(), e))?;
+                // Same shape as `Overwrite::execute` — Wrote carries
+                // the diff so the UI layer can replay it.
                 Ok(ActionOutcome {
                     kind: OutcomeKind::Wrote,
                     decision: None,
-                    diff: None,
+                    diff: Some(diff),
                     error: None,
                 })
             }
@@ -131,7 +138,12 @@ fn compose(marker: &MarkerSpec, current: Option<&str>, body: &str) -> ComposeRes
     let end = current.find(&marker.end);
 
     match (begin, end) {
-        (Some(bs), Some(es)) if es >= bs => {
+        // `es >= bs + begin.len()` — the end marker must start
+        // strictly *after* the begin marker ends, so a marker
+        // pair that overlaps (or where begin == end as a literal
+        // substring matching at the same position) falls through
+        // to the catch-all Diverged arm.
+        (Some(bs), Some(es)) if es >= bs + marker.begin.len() => {
             // Replace from start of `begin` through end of `end`.
             let end_pos = es + marker.end.len();
             let mut new_body = current[..bs].to_string();
@@ -147,9 +159,10 @@ fn compose(marker: &MarkerSpec, current: Option<&str>, body: &str) -> ComposeRes
             }
         }
         (Some(_), None) | (None, Some(_)) => ComposeResult::Diverged,
-        (Some(_bs), Some(_es)) => {
-            // bs > es — markers are in the wrong order. Treat as
-            // diverged; user-broken.
+        (Some(_), Some(_)) => {
+            // Markers overlap, are reversed, or use the same
+            // literal in both positions. Refuse to guess what the
+            // user meant; surface as Diverged.
             ComposeResult::Diverged
         }
         (None, None) => {
@@ -286,6 +299,22 @@ mod tests {
     fn diverged_when_markers_swapped() {
         let cur = "# <<< kata managed >>>\nbackwards\n# >>> kata managed <<<\n";
         let r = compose(&marker(), Some(cur), "body");
+        assert!(matches!(r, ComposeResult::Diverged));
+    }
+
+    #[test]
+    fn diverged_when_begin_and_end_are_identical_literals() {
+        // Edge case the `es >= bs + begin.len()` check guards: if
+        // `begin == end` as substrings, both `find` calls return
+        // the same position and only ONE marker is actually present
+        // — which under the old `es >= bs` check would have been
+        // mistakenly treated as a valid pair.
+        let m = MarkerSpec {
+            begin: "// SAME //".to_string(),
+            end: "// SAME //".to_string(),
+        };
+        let cur = "before\n// SAME //\nafter\n";
+        let r = compose(&m, Some(cur), "body");
         assert!(matches!(r, ComposeResult::Diverged));
     }
 }
