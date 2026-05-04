@@ -3,8 +3,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::error::{Error, Result};
 use crate::preset::TemplateRef;
 
-/// Where a template lives. Phase 1 supports `Local` only; `Git`
-/// is recognised so we can give a clear "not yet implemented" error.
+/// Where a template lives. Local sources resolve directly against
+/// `base_dir`; Git sources are clone-on-first-use into the
+/// `TemplateCache` (see `template/cache.rs`).
 #[derive(Debug, Clone)]
 pub enum TemplateSource {
     Local {
@@ -37,27 +38,21 @@ impl TemplateSource {
             // unrelated directory, so refuse them up front.
             let normalised_root = normalise(&root_only);
             let final_root = if let Some(sub) = &t.subdir {
-                let sub_path = Utf8Path::new(sub);
-                if sub_path.is_absolute() {
-                    return Err(Error::template(
-                        s,
-                        format!("subdir `{sub}` must be relative, not absolute"),
-                    ));
-                }
-                if escapes_via_parent(sub_path) {
-                    return Err(Error::template(
-                        s,
-                        format!("subdir `{sub}` escapes the source root via `..`"),
-                    ));
-                }
+                validate_subdir(s, sub)?;
                 normalise(&normalised_root.join(sub))
             } else {
                 normalised_root
             };
             Ok(Self::Local { root: final_root })
         } else {
+            // Git remote. Validate subdir up front so we don't waste
+            // a network clone on a hostile spec, then normalise the
+            // URL form (`github.com/x/y` → `https://github.com/x/y`).
+            if let Some(sub) = &t.subdir {
+                validate_subdir(s, sub)?;
+            }
             Ok(Self::Git {
-                url: s.to_string(),
+                url: normalise_git_url(s),
                 rev: t.rev.clone(),
                 subdir: t.subdir.clone(),
             })
@@ -120,10 +115,56 @@ fn normalise(p: &Utf8Path) -> Utf8PathBuf {
     out
 }
 
+/// Reject absolute or `..`-escaping subdirs. Common to Local and
+/// Git sources — security check that runs before any I/O.
+fn validate_subdir(spec: &str, sub: &str) -> Result<()> {
+    let sub_path = Utf8Path::new(sub);
+    if sub_path.is_absolute() {
+        return Err(Error::template(
+            spec,
+            format!("subdir `{sub}` must be relative, not absolute"),
+        ));
+    }
+    if escapes_via_parent(sub_path) {
+        return Err(Error::template(
+            spec,
+            format!("subdir `{sub}` escapes the source root via `..`"),
+        ));
+    }
+    Ok(())
+}
+
+/// Normalise a git source spec into a URL `git` will accept.
+/// `github.com/owner/repo` style shorthand is expanded to
+/// `https://github.com/owner/repo`; common forge shorthands
+/// (gitlab.com / bitbucket.org / codeberg.org) get the same
+/// treatment. Anything that already looks like a URL or SSH spec
+/// passes through verbatim.
+pub(crate) fn normalise_git_url(s: &str) -> String {
+    if s.starts_with("https://")
+        || s.starts_with("http://")
+        || s.starts_with("ssh://")
+        || s.starts_with("git://")
+        || s.starts_with("file://")
+        || s.starts_with("git+ssh://")
+        || s.starts_with("git@")
+    {
+        return s.to_string();
+    }
+    if s.starts_with("github.com/")
+        || s.starts_with("gitlab.com/")
+        || s.starts_with("bitbucket.org/")
+        || s.starts_with("codeberg.org/")
+    {
+        return format!("https://{s}");
+    }
+    s.to_string()
+}
+
 /// True when the relative path `..`-pops above its starting depth at
 /// any point during traversal. Pure logical check; the path may not
 /// exist on disk.
-fn escapes_via_parent(p: &Utf8Path) -> bool {
+pub(crate) fn escapes_via_parent(p: &Utf8Path) -> bool {
     use camino::Utf8Component;
     let mut depth: i32 = 0;
     for comp in p.components() {
@@ -142,20 +183,6 @@ fn escapes_via_parent(p: &Utf8Path) -> bool {
         }
     }
     false
-}
-
-impl TemplateSource {
-    /// Phase-1 helper: extract the local root, returning an error if
-    /// the source is `Git`.
-    pub fn require_local(&self) -> Result<&Utf8Path> {
-        match self {
-            Self::Local { root } => Ok(root.as_path()),
-            Self::Git { url, .. } => Err(Error::template(
-                url.clone(),
-                "git templates are not supported in Phase 1",
-            )),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -190,9 +217,37 @@ mod tests {
     }
 
     #[test]
-    fn require_local_errors_on_git() {
+    fn git_source_normalises_github_shorthand() {
         let s = TemplateSource::from_ref(&r("github.com/x/y"), Utf8Path::new("/base")).unwrap();
-        let err = s.require_local().unwrap_err();
+        match s {
+            TemplateSource::Git { url, .. } => {
+                assert_eq!(url, "https://github.com/x/y");
+            }
+            _ => panic!("expected Git source"),
+        }
+    }
+
+    #[test]
+    fn git_source_passes_through_existing_url() {
+        let s =
+            TemplateSource::from_ref(&r("https://example.com/repo.git"), Utf8Path::new("/base"))
+                .unwrap();
+        match s {
+            TemplateSource::Git { url, .. } => {
+                assert_eq!(url, "https://example.com/repo.git");
+            }
+            _ => panic!("expected Git source"),
+        }
+    }
+
+    #[test]
+    fn git_source_rejects_absolute_subdir() {
+        // Same security check as Local — apply runs before the
+        // network clone so a hostile preset can't get us to fetch
+        // anything just to find out it's bad.
+        let mut t = r("github.com/x/y");
+        t.subdir = Some("/etc".into());
+        let err = TemplateSource::from_ref(&t, Utf8Path::new("/base")).unwrap_err();
         assert!(matches!(err, Error::Template { .. }));
     }
 
