@@ -16,9 +16,11 @@
 
 use std::path::{Path, PathBuf};
 
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::template::{TemplateCache, source::normalise_git_url};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Preset {
@@ -207,15 +209,33 @@ impl Preset {
         toml::from_str(&raw).map_err(|e| Error::preset(path, e.message()))
     }
 
-    /// Resolve a `PresetSpec` whose source is local. The result is
-    /// the parsed `Preset`. The preset filename is derived from
-    /// `spec.preset_name` (defaulting to `default`) — we look for
-    /// `<source>/<subdir?>/<preset-name>.toml`.
+    /// Resolve a `PresetSpec` to a parsed `Preset` and the directory
+    /// any *relative* template `source` paths inside should resolve
+    /// against. The directory becomes `applied.toml.base_dir` so
+    /// re-apply doesn't depend on the cwd at the time it's invoked.
+    ///
+    /// Local sources (`./...` / `../...` / absolute) read straight
+    /// off disk; git sources are clone-on-first-use into the same
+    /// `TemplateCache` slot infrastructure as `TemplateRef`.
+    pub async fn resolve(spec: &PresetSpec, cache: &TemplateCache) -> Result<(Self, Utf8PathBuf)> {
+        if spec.is_local() {
+            Self::resolve_local_inner(spec)
+        } else {
+            Self::resolve_git(spec, cache).await
+        }
+    }
+
+    /// Local-only path: same as the original `resolve_local`,
+    /// retained as the synchronous fast path for fixtures + tests.
     pub fn resolve_local(spec: &PresetSpec) -> Result<Self> {
+        Self::resolve_local_inner(spec).map(|(p, _)| p)
+    }
+
+    fn resolve_local_inner(spec: &PresetSpec) -> Result<(Self, Utf8PathBuf)> {
         if !spec.is_local() {
             return Err(Error::Preset {
                 path: PathBuf::from(&spec.source),
-                message: "git sources are not yet supported (Phase 2)".into(),
+                message: "expected a local preset path".into(),
             });
         }
         let mut path = PathBuf::from(&spec.source);
@@ -226,12 +246,54 @@ impl Preset {
 
         // Allow either `<name>.toml` or pointing the source DIRECTLY
         // at a `.toml` file (handy for fixtures and one-off layouts).
-        let candidate = if path.is_file() {
+        let preset_file = if path.is_file() {
             path
         } else {
             path.join(format!("{preset_name}.toml"))
         };
-        Self::load(&candidate)
+
+        let preset = Self::load(&preset_file)?;
+        let base_dir = preset_file
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let base_dir = Utf8PathBuf::from_path_buf(base_dir).map_err(|p| Error::Preset {
+            path: PathBuf::from(&spec.source),
+            message: format!("preset dir is not valid UTF-8: {}", p.display()),
+        })?;
+        Ok((preset, base_dir))
+    }
+
+    async fn resolve_git(spec: &PresetSpec, cache: &TemplateCache) -> Result<(Self, Utf8PathBuf)> {
+        // Reuse the URL normaliser the template-side code already
+        // ships — same forge-shorthand expansion (`github.com/x/y`
+        // → `https://github.com/x/y`).
+        let url = normalise_git_url(&spec.source);
+        let (slot, _sha) = cache
+            .fetch_or_clone(&url, spec.rev.as_deref())
+            .await
+            .map_err(|e| Error::Preset {
+                path: PathBuf::from(&spec.source),
+                message: e.to_string(),
+            })?;
+        let preset_dir: Utf8PathBuf = match &spec.subdir {
+            Some(sub) => slot.join(sub),
+            None => slot,
+        };
+        let preset_name = spec.preset_name.as_deref().unwrap_or("default");
+        let preset_file = preset_dir.join(format!("{preset_name}.toml"));
+        let preset = Self::load(preset_file.as_std_path())?;
+        // `base_dir` is the directory the preset file lives in —
+        // template `source` paths inside the preset (when relative)
+        // resolve against it. For git presets that's the cache slot
+        // (or its subdir); typically authors will use absolute git
+        // URLs for `[[templates]] source`, but relative paths at
+        // least map deterministically.
+        let base_dir = preset_file
+            .parent()
+            .map(Utf8Path::to_path_buf)
+            .unwrap_or_else(|| Utf8PathBuf::from("."));
+        Ok((preset, base_dir))
     }
 }
 
