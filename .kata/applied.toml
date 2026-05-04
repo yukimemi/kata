@@ -1,0 +1,20 @@
+preset = "github.com/yukimemi/pj-presets:rust-cli"
+applied_at = "2026-05-04T14:35:18.1146598Z"
+
+[[templates]]
+source = "github.com/yukimemi/pj-base"
+rev = "92b0a9097b90699452ee077fb267eb16f2d14238"
+version = "0.1.0"
+
+[[templates]]
+source = "github.com/yukimemi/pj-rust"
+rev = "eedac55c6b9d7c80f597e776dbbc361ca1934525"
+version = "0.1.0"
+
+[[templates]]
+source = "github.com/yukimemi/pj-rust-cli"
+rev = "a891c2091763fcfcb56d41948452ef18978d0f1e"
+version = "0.1.1"
+
+[files.".github/workflows/ci.yml"]
+content_hash = "a7a9e10867d5b2ec06fecb9f3248b0f2ad940584cc583bd2b9dd48cccff624b8"
