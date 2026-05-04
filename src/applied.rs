@@ -44,6 +44,10 @@ pub struct AppliedTemplate {
     pub source: String,
     /// Resolved revision (commit SHA for git, "local" for filesystem).
     pub rev: String,
+    /// Sub-directory inside the source (preserves the `//<subdir>`
+    /// portion of the spec so re-apply loads from the same place).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<String>,
     /// Manifest's `version` field at apply time, if it had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
@@ -136,6 +140,7 @@ mod tests {
         s.promote_template(AppliedTemplate {
             source: "/local/pj-base".into(),
             rev: "local".into(),
+            subdir: None,
             version: None,
         });
         s.record(
@@ -171,16 +176,19 @@ mod tests {
         s.promote_template(AppliedTemplate {
             source: "x".into(),
             rev: "1".into(),
+            subdir: None,
             version: None,
         });
         s.promote_template(AppliedTemplate {
             source: "x".into(),
             rev: "2".into(),
+            subdir: None,
             version: None,
         });
         s.promote_template(AppliedTemplate {
             source: "y".into(),
             rev: "1".into(),
+            subdir: None,
             version: None,
         });
         assert_eq!(s.templates.len(), 2);

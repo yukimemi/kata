@@ -399,6 +399,52 @@ fn status_reports_create_for_uninitialised_files() {
 }
 
 #[test]
+fn init_refuses_dst_path_traversal() {
+    // A hostile / buggy template should NOT be able to write outside
+    // the project root via `dst = "../../escape"` — defence in depth
+    // for the `check_relative_contained` runner guard.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("evil"))
+        .manifest(
+            r#"
+            name = "evil"
+            [[file]]
+            src = "payload"
+            dst = "../../escape.txt"
+            how = "overwrite"
+            when = "always"
+            "#,
+        )
+        .file("payload", "owned\n");
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/evil"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("escapes its root"));
+
+    // The escape file must NOT have been written.
+    assert!(!td.path().join("escape.txt").exists());
+}
+
+#[test]
 fn init_refuses_remote_preset_in_phase_1() {
     let td = TempDir::new().unwrap();
     let pj = td.path().join("demo");

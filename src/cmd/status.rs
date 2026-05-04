@@ -26,7 +26,7 @@ pub async fn run(at: Option<Utf8PathBuf>, interactive: bool, no_color: bool) -> 
         .map(|t| TemplateRef {
             source: t.source.clone(),
             rev: Some(t.rev.clone()),
-            subdir: None,
+            subdir: t.subdir.clone(),
         })
         .collect();
 

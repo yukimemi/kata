@@ -35,15 +35,16 @@ pub async fn run(
         )));
     }
 
-    // Convert AppliedTemplate back to TemplateRef. Phase 1 stores
-    // local source paths verbatim, so this round-trips cleanly.
+    // Convert AppliedTemplate back to TemplateRef. Restoring `subdir`
+    // is essential — without it, re-apply would load from the wrong
+    // root for templates originally specified with `//<subdir>`.
     let templates: Vec<TemplateRef> = applied
         .templates
         .iter()
         .map(|t| TemplateRef {
             source: t.source.clone(),
             rev: Some(t.rev.clone()),
-            subdir: None,
+            subdir: t.subdir.clone(),
         })
         .collect();
 

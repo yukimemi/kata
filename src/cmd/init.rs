@@ -25,10 +25,11 @@ pub async fn run(
     let pj_root = resolve_pj_root(at)?;
     std::fs::create_dir_all(pj_root.as_std_path())
         .map_err(|e| Error::io_at(pj_root.as_std_path(), e))?;
-    ensure_state_dir(&pj_root)?;
 
     // Refuse to bootstrap inside a project that already has its own
-    // `.kata/applied.toml` ancestor (Q9 in ROADMAP).
+    // `.kata/applied.toml` ancestor (Q9 in ROADMAP). Run *before*
+    // ensure_state_dir so a refused init doesn't leave an orphan
+    // `.kata/` behind.
     if let Some(existing) = crate::paths::find_pj_root(&pj_root) {
         if existing != pj_root {
             return Err(Error::Config(format!(
@@ -36,6 +37,7 @@ pub async fn run(
             )));
         }
     }
+    ensure_state_dir(&pj_root)?;
 
     // 1. Parse and resolve the preset spec (Phase 1: local only).
     let spec = PresetSpec::parse(&preset_spec)?;

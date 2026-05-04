@@ -148,9 +148,12 @@ fn split_trailing_preset_name(s: &str) -> (&str, Option<&str>) {
             if !is_scheme_colon && !is_drive_colon && !s[..idx].contains("://") {
                 return (prefix, Some(suffix));
             }
-            // For `scheme://`, fall through; the suffix is part of
-            // the URL.
-            if s[..idx].contains("://") && !suffix.contains('@') {
+            // For `scheme://`, the suffix can still be a preset name
+            // ONLY when the URL has no `user@host:repo` form — i.e.
+            // neither the prefix nor the suffix contains `@`.
+            // `git+ssh://user@host:repo` falls through and stays
+            // attached to the source.
+            if s[..idx].contains("://") && !suffix.contains('@') && !prefix.contains('@') {
                 return (prefix, Some(suffix));
             }
         }
@@ -179,13 +182,19 @@ fn split_subdir(s: &str) -> (&str, Option<&str>) {
 }
 
 fn split_rev(s: &str) -> (&str, Option<&str>) {
-    // `@<rev>` — but `git+ssh://user@host/...` also has `@`. Only
-    // honor the LAST `@` whose suffix doesn't contain `/`, `:`, or
-    // path separators.
+    // `@<rev>` — but `git+ssh://user@host:repo` also has `@` as the
+    // userinfo separator. Refuse to treat `@` as a rev marker when
+    // the prefix contains a scheme (`://`), since the `@` is part of
+    // the URL authority.
     if let Some(idx) = s.rfind('@') {
         let suffix = &s[idx + 1..];
-        if !suffix.is_empty() && !suffix.contains('/') && !suffix.contains('\\') {
-            return (&s[..idx], Some(suffix));
+        let prefix = &s[..idx];
+        if !suffix.is_empty()
+            && !suffix.contains('/')
+            && !suffix.contains('\\')
+            && !prefix.contains("://")
+        {
+            return (prefix, Some(suffix));
         }
     }
     (s, None)
@@ -257,6 +266,15 @@ mod tests {
         assert_eq!(s.rev.as_deref(), Some("v1.0"));
         assert_eq!(s.subdir.as_deref(), Some("path/to"));
         assert_eq!(s.preset_name.as_deref(), Some("name"));
+    }
+
+    #[test]
+    fn ssh_url_with_user_and_repo_keeps_repo_attached() {
+        // `git+ssh://user@host:repo` must stay together — `repo`
+        // is part of the URL, not a preset name.
+        let s = PresetSpec::parse("git+ssh://user@host:repo").unwrap();
+        assert_eq!(s.source, "git+ssh://user@host:repo");
+        assert_eq!(s.preset_name, None);
     }
 
     #[test]

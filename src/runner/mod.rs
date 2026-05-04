@@ -113,11 +113,18 @@ pub async fn apply_to_pj(
         applied_templates.push(AppliedTemplate {
             source: handle.source_spec.clone(),
             rev: handle.rev.clone(),
+            subdir: handle.subdir.clone(),
             version: handle.manifest.version.clone(),
         });
 
         for spec in &handle.manifest.files {
+            // Reject template-supplied paths that try to escape the
+            // template root or PJ root via `..` / absolute paths.
+            // (Critical security check — prevents template metadata
+            // from turning apply into an arbitrary read/write.)
+            check_relative_contained(&spec.src, "template src")?;
             let dst_rel = render_dst(&mut renderer, spec, &ctx)?;
+            check_relative_contained(&dst_rel, "destination")?;
             let dst_abs = pj_root.join(&dst_rel);
             let src_abs = handle.root.join(&spec.src);
 
@@ -157,7 +164,7 @@ pub async fn apply_to_pj(
                 }
             };
             let rendered_body = renderer.render(&raw, &ctx)?;
-            let current_body = std::fs::read_to_string(dst_abs.as_std_path()).ok();
+            let current_body = read_existing_text(dst_abs.as_path())?;
 
             let mode = for_how(spec.how);
             let action_ctx = ActionContext {
@@ -290,7 +297,9 @@ pub async fn plan_pj(
     let mut out = Vec::new();
     for handle in &handles {
         for spec in &handle.manifest.files {
+            check_relative_contained(&spec.src, "template src")?;
             let dst_rel = render_dst(&mut renderer, spec, &ctx)?;
+            check_relative_contained(&dst_rel, "destination")?;
             let dst_abs = pj_root.join(&dst_rel);
             let src_abs = handle.root.join(&spec.src);
 
@@ -322,7 +331,7 @@ pub async fn plan_pj(
                 }
             };
             let rendered_body = renderer.render(&raw, &ctx)?;
-            let current_body = std::fs::read_to_string(dst_abs.as_std_path()).ok();
+            let current_body = read_existing_text(dst_abs.as_path())?;
 
             let mode = for_how(spec.how);
             let action_ctx = ActionContext {
@@ -346,8 +355,81 @@ pub async fn plan_pj(
     Ok(out)
 }
 
-/// Discard variable to avoid an unused-import warning when callers
-/// pull `Error` indirectly. Phase 1 leaves this as a marker for
-/// future test scaffolding.
-#[allow(dead_code)]
-fn _ensure_error_use(_: &Error) {}
+/// Read a file's text, distinguishing "not present" from real I/O
+/// errors. Returns `Ok(None)` only on `NotFound`; permission denied,
+/// invalid UTF-8, etc. surface as errors so we don't silently
+/// "create" over a file we just couldn't read.
+fn read_existing_text(path: &camino::Utf8Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path.as_std_path()) {
+        Ok(body) => Ok(Some(body)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::io_at(path.as_std_path(), e)),
+    }
+}
+
+/// Reject template-supplied relative paths that would escape their
+/// root via `..` or be absolute. `kind` is for the error message
+/// (`"template src"` / `"destination"`).
+///
+/// This is the load-bearing security check that makes apply safe
+/// against hostile / buggy template metadata.
+fn check_relative_contained(rel: &str, kind: &str) -> Result<()> {
+    use std::path::{Component, Path};
+    let p = Path::new(rel);
+    if p.is_absolute() {
+        return Err(Error::Other(anyhow::anyhow!(
+            "{kind} path `{rel}` must be relative, not absolute"
+        )));
+    }
+    let mut depth: i32 = 0;
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(Error::Other(anyhow::anyhow!(
+                        "{kind} path `{rel}` escapes its root via `..`"
+                    )));
+                }
+            }
+            Component::Normal(_) => depth += 1,
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(Error::Other(anyhow::anyhow!(
+                    "{kind} path `{rel}` must be relative"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_contained_accepts_simple_relative() {
+        assert!(check_relative_contained("Makefile.toml", "x").is_ok());
+        assert!(check_relative_contained("src/main.rs", "x").is_ok());
+        assert!(check_relative_contained("a/b/c.txt", "x").is_ok());
+        assert!(check_relative_contained("./Makefile.toml", "x").is_ok());
+        assert!(check_relative_contained("a/./b", "x").is_ok());
+        assert!(check_relative_contained("a/b/../c", "x").is_ok());
+    }
+
+    #[test]
+    fn check_contained_rejects_traversal() {
+        assert!(check_relative_contained("../etc/passwd", "x").is_err());
+        assert!(check_relative_contained("a/../../escape", "x").is_err());
+        assert!(check_relative_contained("./../bad", "x").is_err());
+    }
+
+    #[test]
+    fn check_contained_rejects_absolute() {
+        assert!(check_relative_contained("/etc/passwd", "x").is_err());
+        if cfg!(windows) {
+            assert!(check_relative_contained(r"C:\Windows\System32", "x").is_err());
+        }
+    }
+}

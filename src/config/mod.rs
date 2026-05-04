@@ -86,13 +86,22 @@ impl GlobalConfig {
         std::fs::write(&path, body).map_err(|e| Error::io_at(path.as_std_path(), e))
     }
 
-    /// Add a project entry. Errors if `name` already exists; if a
-    /// matching `path` exists it's a no-op.
+    /// Add a project entry.
+    ///
+    /// - Same name + same path → no-op (idempotent re-register).
+    /// - Same path, different name → error (would corrupt the
+    ///   registry — `find_project(path)` could return either).
+    /// - Same name, different path → error.
+    /// - Otherwise: appended.
     pub fn add_project(&mut self, entry: ProjectEntry) -> Result<()> {
         if let Some(existing) = self.projects.iter().find(|p| p.path == entry.path) {
             if existing.name == entry.name {
                 return Ok(());
             }
+            return Err(Error::Config(format!(
+                "path `{}` is already registered as `{}`",
+                entry.path, existing.name
+            )));
         }
         if self.projects.iter().any(|p| p.name == entry.name) {
             return Err(Error::Config(format!(
@@ -147,6 +156,15 @@ mod tests {
         let mut c = GlobalConfig::default();
         c.add_project(entry("a", "/p1")).unwrap();
         c.add_project(entry("a", "/p1")).unwrap();
+        assert_eq!(c.projects.len(), 1);
+    }
+
+    #[test]
+    fn add_project_rejects_duplicate_path_different_name() {
+        let mut c = GlobalConfig::default();
+        c.add_project(entry("a", "/p1")).unwrap();
+        let err = c.add_project(entry("b", "/p1")).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
         assert_eq!(c.projects.len(), 1);
     }
 

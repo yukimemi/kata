@@ -25,18 +25,36 @@ impl TemplateSource {
     pub fn from_ref(t: &TemplateRef, base_dir: &Utf8Path) -> Result<Self> {
         let s = t.source.trim();
         if is_local_path(s) {
-            let mut root = if Utf8Path::new(s).is_absolute() {
+            let root_only = if Utf8Path::new(s).is_absolute() {
                 Utf8PathBuf::from(s)
             } else {
                 base_dir.join(s)
             };
-            if let Some(sub) = &t.subdir {
-                root = root.join(sub);
-            }
-            // Normalise `..` segments without requiring the path
-            // to exist (canonicalize would).
-            let normalised = normalise(&root);
-            Ok(Self::Local { root: normalised })
+            // Validate `subdir` BEFORE joining: absolute subdirs would
+            // silently replace `root_only` (Path::join semantics), and
+            // `..` segments could escape above the source root.
+            // Both let a malicious / buggy preset point us at an
+            // unrelated directory, so refuse them up front.
+            let normalised_root = normalise(&root_only);
+            let final_root = if let Some(sub) = &t.subdir {
+                let sub_path = Utf8Path::new(sub);
+                if sub_path.is_absolute() {
+                    return Err(Error::template(
+                        s,
+                        format!("subdir `{sub}` must be relative, not absolute"),
+                    ));
+                }
+                if escapes_via_parent(sub_path) {
+                    return Err(Error::template(
+                        s,
+                        format!("subdir `{sub}` escapes the source root via `..`"),
+                    ));
+                }
+                normalise(&normalised_root.join(sub))
+            } else {
+                normalised_root
+            };
+            Ok(Self::Local { root: final_root })
         } else {
             Ok(Self::Git {
                 url: s.to_string(),
@@ -74,30 +92,56 @@ fn is_local_path(s: &str) -> bool {
 
 /// Resolve `..` and `.` segments in a logical path. Does NOT touch
 /// the filesystem (no symlink resolution, no existence check).
+///
+/// For absolute paths, `..` at the root is clamped (i.e. `/..` →
+/// `/`); for relative paths, leading `..` segments are preserved
+/// since they're meaningful relative to the cwd.
 fn normalise(p: &Utf8Path) -> Utf8PathBuf {
-    let mut stack: Vec<&str> = Vec::new();
+    use camino::Utf8Component;
+    let mut out = Utf8PathBuf::new();
     for comp in p.components() {
-        let s = comp.as_str();
-        match s {
-            "." => {}
-            ".." => {
-                if matches!(stack.last(), Some(&seg) if seg != "..") {
-                    stack.pop();
-                } else {
-                    stack.push("..");
+        match comp {
+            Utf8Component::CurDir => {}
+            Utf8Component::ParentDir => {
+                // `Utf8PathBuf::pop()` correctly refuses to pop
+                // above the root of an absolute path. For relative
+                // paths it returns false when nothing's left to
+                // pop, in which case we keep the `..` literal.
+                if !out.pop() && !p.is_absolute() {
+                    out.push("..");
                 }
             }
-            _ => stack.push(s),
+            other => out.push(other.as_str()),
         }
     }
-    if stack.is_empty() {
-        return Utf8PathBuf::from(".");
-    }
-    let mut out = Utf8PathBuf::new();
-    for seg in stack {
-        out.push(seg);
+    if out.as_str().is_empty() {
+        out.push(".");
     }
     out
+}
+
+/// True when the relative path `..`-pops above its starting depth at
+/// any point during traversal. Pure logical check; the path may not
+/// exist on disk.
+fn escapes_via_parent(p: &Utf8Path) -> bool {
+    use camino::Utf8Component;
+    let mut depth: i32 = 0;
+    for comp in p.components() {
+        match comp {
+            Utf8Component::CurDir => {}
+            Utf8Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            Utf8Component::Normal(_) => depth += 1,
+            // Absolute / drive components shouldn't reach here —
+            // callers screen them earlier — but be conservative.
+            Utf8Component::RootDir | Utf8Component::Prefix(_) => return true,
+        }
+    }
+    false
 }
 
 impl TemplateSource {
@@ -150,5 +194,42 @@ mod tests {
         let s = TemplateSource::from_ref(&r("github.com/x/y"), Utf8Path::new("/base")).unwrap();
         let err = s.require_local().unwrap_err();
         assert!(matches!(err, Error::Template { .. }));
+    }
+
+    #[test]
+    fn rejects_absolute_subdir() {
+        let mut t = r("./template");
+        t.subdir = Some("/etc".into());
+        let err = TemplateSource::from_ref(&t, Utf8Path::new("/base")).unwrap_err();
+        assert!(matches!(err, Error::Template { .. }));
+    }
+
+    #[test]
+    fn rejects_subdir_that_escapes_via_parent() {
+        let mut t = r("./template");
+        t.subdir = Some("../../../escape".into());
+        let err = TemplateSource::from_ref(&t, Utf8Path::new("/base")).unwrap_err();
+        assert!(matches!(err, Error::Template { .. }));
+    }
+
+    // Unix-only because Windows doesn't treat `/...` as absolute
+    // (`Path::is_absolute` requires a drive letter or UNC prefix).
+    // The behaviour we're guarding against — popping past the root
+    // — is moot on Windows for `/`-style paths.
+    #[cfg(unix)]
+    #[test]
+    fn normalise_clamps_root_on_absolute_path() {
+        // `/..` should stay at `/`, not collapse to `.`.
+        assert_eq!(normalise(Utf8Path::new("/..")).as_str(), "/");
+        assert_eq!(normalise(Utf8Path::new("/a/..")).as_str(), "/");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalise_preserves_leading_parent_in_relative() {
+        assert_eq!(
+            normalise(Utf8Path::new("../sibling")).as_str(),
+            "../sibling"
+        );
     }
 }

@@ -19,6 +19,9 @@ pub struct TemplateHandle {
     /// Resolved revision label. `"local"` for Local sources; commit
     /// SHA in Phase 2 for Git sources.
     pub rev: String,
+    /// Sub-directory inside the source spec, preserved so it survives
+    /// the round-trip through `applied.toml`.
+    pub subdir: Option<String>,
     /// On-disk root the template lives in.
     pub root: Utf8PathBuf,
     /// Parsed manifest (`template.toml`).
@@ -37,6 +40,7 @@ impl TemplateHandle {
         Ok(Self {
             source_spec: t.source.clone(),
             rev: source.rev_label(),
+            subdir: t.subdir.clone(),
             root,
             manifest,
         })

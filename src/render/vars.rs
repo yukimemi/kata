@@ -30,14 +30,16 @@ pub struct VarSources {
 
 impl VarSources {
     /// Read every `KATA_VAR_<name>` env var into a fresh table.
+    /// The name suffix is preserved verbatim — Tera (and our manifest
+    /// `[vars]` table) is case-sensitive, so lowercasing here would
+    /// silently break templates that declare e.g. `MyVar`.
     pub fn from_env() -> BTreeMap<String, toml::Value> {
         let mut out = BTreeMap::new();
         for (k, v) in std::env::vars_os() {
             let Ok(k) = k.into_string() else { continue };
             let Ok(v) = v.into_string() else { continue };
             if let Some(name) = k.strip_prefix(ENV_PREFIX) {
-                let name = name.to_lowercase();
-                out.insert(name, toml::Value::String(v));
+                out.insert(name.to_string(), toml::Value::String(v));
             }
         }
         out
