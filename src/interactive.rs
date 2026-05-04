@@ -1,9 +1,71 @@
-//! Inquire-based interactive prompts. Phase 1 ships only the var
-//! prompter; the AI `[a]ccept / [e]dit / [s]kip / [d]efer` selector
-//! lands in Phase 3.
+//! Inquire-based interactive prompts. Hosts the var prompter and
+//! the chezmoi-style `[a]ccept / [c]hat / [s]kip / [d]efer` AI
+//! decision dialog used by `modes/ai.rs`. The `[e]dit` and
+//! `[h]andoff` choices land with Phase 3-b4 (CLAUDE.md: "AI
+//! delegation MVP", split for PR-size hygiene).
 
 use crate::error::{Error, Result};
 use crate::manifest::VarSpec;
+
+/// What the user picked for an AI-produced body. Mirrors the
+/// chezmoi flow but with `[c]hat` replacing chezmoi's `[e]dit`
+/// because the kata pattern is "let the AI try again, here's what
+/// to fix" rather than "I'll edit it myself" (the explicit edit
+/// path is a Phase 3-b4 follow-up).
+#[derive(Debug, Clone)]
+pub enum AiDecision {
+    /// Write the AI's body to disk.
+    Accept,
+    /// Hand the AI a one-line refinement and re-run. The string is
+    /// the user's instruction, e.g. "make it shorter".
+    Chat(String),
+    /// Skip this round; do not record a `defer`.
+    Skip,
+    /// Skip this round but ask again on the next apply.
+    Defer,
+}
+
+const CHOICES: [&str; 4] = [
+    "[a]ccept   write the AI body to disk",
+    "[c]hat     give the AI a one-line refinement and try again",
+    "[s]kip     skip this round (do not retry next apply)",
+    "[d]efer    skip this round but ask again next apply",
+];
+
+/// Run the chezmoi-style decision prompt for one `how = "ai"`
+/// file. Caller has already shown the diff, so the prompt itself
+/// stays terse.
+pub fn prompt_ai_decision(dst: &str) -> Result<AiDecision> {
+    let label = format!("AI proposal for {dst}:");
+    let pick = inquire::Select::new(&label, CHOICES.to_vec())
+        .with_help_message("\u{2191}\u{2193} to move, Enter to confirm, Esc to defer")
+        .prompt()
+        .map_err(map_inquire_err)?;
+
+    let starts_with = |k: char| pick.starts_with(&format!("[{k}]"));
+    if starts_with('a') {
+        return Ok(AiDecision::Accept);
+    }
+    if starts_with('s') {
+        return Ok(AiDecision::Skip);
+    }
+    if starts_with('d') {
+        return Ok(AiDecision::Defer);
+    }
+    if starts_with('c') {
+        let instr = inquire::Text::new("Refinement instruction (1 line):")
+            .with_help_message(
+                "e.g. \"keep my custom Section X\" / \"shorter\" / \"add a note about ROADMAP\"",
+            )
+            .prompt()
+            .map_err(map_inquire_err)?;
+        return Ok(AiDecision::Chat(instr));
+    }
+    // Should be unreachable given the four-element CHOICES list,
+    // but be defensive — prefer Defer over panicking on an
+    // unexpected option string.
+    Ok(AiDecision::Defer)
+}
 
 /// Prompt the user for a single variable's value, honouring the spec
 /// (`choices` → Select, `secret` → Password, otherwise a text
