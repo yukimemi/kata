@@ -16,7 +16,9 @@ use crate::runner::{PjApplyOptions, apply_to_pj};
 use crate::template::TemplateCache;
 use crate::ui;
 
-use super::{ensure_state_dir, parse_cli_vars, resolve_ai_concurrency, resolve_pj_root};
+use super::{
+    ensure_state_dir, parse_cli_vars, resolve_ai_concurrency, resolve_pj_root, resolve_project_name,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -60,7 +62,7 @@ pub async fn run(
     // 2. Build a synthetic ProjectEntry (we don't auto-register
     //    yet — registry handling is Phase 2-g).
     let project = ProjectEntry {
-        name: pj_root.file_name().unwrap_or("kata-project").to_string(),
+        name: resolve_project_name(&pj_root).await,
         path: pj_root.clone(),
         tags: vec![],
         overrides: None,
