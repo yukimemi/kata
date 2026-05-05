@@ -322,6 +322,12 @@ pub async fn plan_pj(
 ) -> Result<Vec<(String, crate::modes::PlanKind, Option<String>)>> {
     let applied = AppliedState::load(&pj_root)?;
 
+    // Plan never invokes the agent, but `ActionContext` requires a
+    // semaphore. Build a single 1-permit sema for the whole plan
+    // and clone the `Arc` per file rather than allocating one
+    // semaphore per `[[file]]` entry.
+    let plan_sema = Arc::new(Semaphore::new(1));
+
     let mut handles: Vec<TemplateHandle> = Vec::with_capacity(templates.len());
     for t in &templates {
         handles.push(TemplateHandle::load(t, &base_dir).await?);
@@ -406,10 +412,7 @@ pub async fn plan_pj(
                 yes_all: false,
                 ai_prompt: None,
                 ai_mode_override: None,
-                // `plan` never invokes the agent so the gate
-                // doesn't matter — give it a 1-permit sema for
-                // cheap construction.
-                ai_sema: Arc::new(Semaphore::new(1)),
+                ai_sema: plan_sema.clone(),
             };
             let plan = mode.plan(&action_ctx).await?;
             out.push((dst_rel, plan.kind, plan.diff));

@@ -9,14 +9,14 @@ use camino::Utf8PathBuf;
 
 use crate::ai::{agent_for_kind, resolve_backend};
 use crate::applied::AppliedState;
-use crate::config::{GlobalConfig, ProjectEntry};
+use crate::config::ProjectEntry;
 use crate::error::{Error, Result};
 use crate::manifest::{AgentKind, AiMode};
 use crate::preset::TemplateRef;
 use crate::runner::{PjApplyOptions, apply_to_pj};
 use crate::ui;
 
-use super::{parse_cli_vars, resolve_pj_root};
+use super::{parse_cli_vars, resolve_ai_concurrency, resolve_pj_root};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -79,11 +79,7 @@ pub async fn run(
         resolve_backend(ai_kind)
     };
 
-    let ai_concurrency = ai_concurrency_override.unwrap_or_else(|| {
-        GlobalConfig::load()
-            .map(|c| c.defaults.ai_concurrency)
-            .unwrap_or(4)
-    });
+    let ai_concurrency = resolve_ai_concurrency(ai_concurrency_override);
     let opts = PjApplyOptions {
         dry_run: false,
         no_ai,

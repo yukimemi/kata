@@ -26,6 +26,8 @@
 
 use async_trait::async_trait;
 
+use tokio::sync::{Semaphore, SemaphorePermit};
+
 use crate::ai::{AiRequest, DEFAULT_SYSTEM_PROMPT, run_handoff};
 use crate::applied::Decision;
 use crate::error::{Error, Result};
@@ -106,9 +108,7 @@ impl ApplyMode for Ai {
             // Gate the handoff spawn against the global AI
             // concurrency cap (default 4). The permit is dropped
             // when the agent process exits.
-            let _permit = ctx.ai_sema.acquire().await.map_err(|e| {
-                Error::Other(anyhow::Error::from(e).context("acquiring AI concurrency permit"))
-            })?;
+            let _permit = acquire_ai_permit(&ctx.ai_sema).await?;
             run_handoff(backend, &handoff_prompt, ctx.dst_abs.as_std_path()).await?;
             return Ok(skipped(Decision::Defer, None));
         }
@@ -143,9 +143,7 @@ impl ApplyMode for Ai {
             // turns each acquire fresh so a stuck agent can't keep
             // the gate locked between calls.
             let response = {
-                let _permit = ctx.ai_sema.acquire().await.map_err(|e| {
-                    Error::Other(anyhow::Error::from(e).context("acquiring AI concurrency permit"))
-                })?;
+                let _permit = acquire_ai_permit(&ctx.ai_sema).await?;
                 agent.run(req).await?
             };
             let body = match response.full_body {
@@ -218,11 +216,7 @@ impl ApplyMode for Ai {
                     // own Edit / Write tools are responsible for
                     // updating the dst.
                     let handoff_prompt = build_handoff_prompt(&user_prompt, ctx, &body);
-                    let _permit = ctx.ai_sema.acquire().await.map_err(|e| {
-                        Error::Other(
-                            anyhow::Error::from(e).context("acquiring AI concurrency permit"),
-                        )
-                    })?;
+                    let _permit = acquire_ai_permit(&ctx.ai_sema).await?;
                     run_handoff(backend, &handoff_prompt, ctx.dst_abs.as_std_path()).await?;
                     return Ok(skipped(Decision::Defer, None));
                 }
@@ -392,6 +386,18 @@ fn edit_in_editor(dst_label: &str, body: &str) -> Result<String> {
         .map_err(|e| Error::Other(anyhow::Error::from(e).context("reading edited tmp file")))?;
     // tmp file dropped here; tempfile cleans up.
     Ok(edited)
+}
+
+/// Acquire a permit on the run-wide AI semaphore, mapping
+/// `tokio::sync::AcquireError` (the only failure mode — a closed
+/// sema, which we never close) into a kata `Error`. Centralised so
+/// the three call sites that gate AI work
+/// (manifest-elected handoff, chat turn, in-dialog handoff) keep
+/// reading top-to-bottom.
+async fn acquire_ai_permit(sema: &Semaphore) -> Result<SemaphorePermit<'_>> {
+    sema.acquire().await.map_err(|e| {
+        Error::Other(anyhow::Error::from(e).context("acquiring AI concurrency permit"))
+    })
 }
 
 /// Initial-handoff variant of `build_handoff_prompt`. Used when
