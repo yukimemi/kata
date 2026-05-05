@@ -7,7 +7,7 @@ use camino::Utf8PathBuf;
 
 use crate::ai::{agent_for_kind, resolve_backend};
 use crate::applied::AppliedState;
-use crate::config::ProjectEntry;
+use crate::config::{GlobalConfig, ProjectEntry};
 use crate::error::{Error, Result};
 use crate::manifest::{AgentKind, AiMode};
 use crate::preset::TemplateRef;
@@ -26,6 +26,7 @@ pub async fn run(
     yes: bool,
     ai_prompt: Option<String>,
     ai_mode_override: Option<AiMode>,
+    ai_concurrency_override: Option<usize>,
     interactive: bool,
     no_color: bool,
 ) -> Result<()> {
@@ -76,6 +77,15 @@ pub async fn run(
         resolve_backend(ai_kind)
     };
 
+    let ai_concurrency = ai_concurrency_override.unwrap_or_else(|| {
+        // Errors loading the global config (missing / malformed) are
+        // already surfaced elsewhere; here we just want the default
+        // when it's not readable.
+        GlobalConfig::load()
+            .map(|c| c.defaults.ai_concurrency)
+            .unwrap_or(4)
+    });
+
     let opts = PjApplyOptions {
         dry_run,
         no_ai,
@@ -86,6 +96,7 @@ pub async fn run(
         ai_prompt,
         agent_backend,
         ai_mode_override,
+        ai_concurrency,
     };
     let result = apply_to_pj(
         project,

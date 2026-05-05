@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use camino::{Utf8Path, Utf8PathBuf};
+use tokio::sync::Semaphore;
 
 use crate::ai::{AiAgent, Backend};
 use crate::applied::Decision;
@@ -69,6 +70,15 @@ pub struct ActionContext<'a> {
     /// drive the agent CLI directly. `None` means "use whatever the
     /// manifest declares (default `Chat`)".
     pub ai_mode_override: Option<AiMode>,
+    /// Global gate that caps how many AI calls (chat turns +
+    /// handoffs + `[e]dit` round-trips) can be in flight at once.
+    /// Always supplied by the runner — single-PJ flows still use
+    /// it because the chat loop itself can fan out per-file once
+    /// Phase 3-d's tokio orchestration lands. The default capacity
+    /// is `defaults.ai_concurrency` (`4`) so a casual `kata apply`
+    /// never spawns more than 4 agents simultaneously even on a
+    /// repository with dozens of `how = "ai"` files.
+    pub ai_sema: Arc<Semaphore>,
 }
 
 /// What a mode reports during `plan` (read-only preview).

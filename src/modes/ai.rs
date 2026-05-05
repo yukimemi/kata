@@ -103,6 +103,12 @@ impl ApplyMode for Ai {
             };
             let user_prompt = compose_user_prompt(ctx.ai_prompt, ctx.spec.prompt.as_deref());
             let handoff_prompt = build_handoff_prompt_initial(&user_prompt, ctx);
+            // Gate the handoff spawn against the global AI
+            // concurrency cap (default 4). The permit is dropped
+            // when the agent process exits.
+            let _permit = ctx.ai_sema.acquire().await.map_err(|e| {
+                Error::Other(anyhow::Error::from(e).context("acquiring AI concurrency permit"))
+            })?;
             run_handoff(backend, &handoff_prompt, ctx.dst_abs.as_std_path()).await?;
             return Ok(skipped(Decision::Defer, None));
         }
@@ -132,7 +138,16 @@ impl ApplyMode for Ai {
                 dst: ctx.dst_abs.clone(),
             };
 
-            let response = agent.run(req).await?;
+            // Gate every chat turn against the AI concurrency cap.
+            // The permit is held only for this turn; chat refinement
+            // turns each acquire fresh so a stuck agent can't keep
+            // the gate locked between calls.
+            let response = {
+                let _permit = ctx.ai_sema.acquire().await.map_err(|e| {
+                    Error::Other(anyhow::Error::from(e).context("acquiring AI concurrency permit"))
+                })?;
+                agent.run(req).await?
+            };
             let body = match response.full_body {
                 Some(b) => b,
                 None => {
@@ -203,6 +218,11 @@ impl ApplyMode for Ai {
                     // own Edit / Write tools are responsible for
                     // updating the dst.
                     let handoff_prompt = build_handoff_prompt(&user_prompt, ctx, &body);
+                    let _permit = ctx.ai_sema.acquire().await.map_err(|e| {
+                        Error::Other(
+                            anyhow::Error::from(e).context("acquiring AI concurrency permit"),
+                        )
+                    })?;
                     run_handoff(backend, &handoff_prompt, ctx.dst_abs.as_std_path()).await?;
                     return Ok(skipped(Decision::Defer, None));
                 }

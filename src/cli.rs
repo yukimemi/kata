@@ -124,6 +124,11 @@ pub enum Command {
         /// manifest's declared mode (default `chat`).
         #[arg(long = "ai-mode", value_enum, value_name = "MODE")]
         ai_mode: Option<AiModeArg>,
+        /// Maximum concurrent AI calls (chat turns / handoff
+        /// spawns / editor round-trips). Overrides
+        /// `defaults.ai_concurrency` (default 4) for this run.
+        #[arg(long = "ai-concurrency", value_name = "N")]
+        ai_concurrency: Option<usize>,
     },
 
     /// Re-apply this project's templates against the recorded state.
@@ -159,6 +164,11 @@ pub enum Command {
         /// manifest's declared mode (default `chat`).
         #[arg(long = "ai-mode", value_enum, value_name = "MODE")]
         ai_mode: Option<AiModeArg>,
+        /// Maximum concurrent AI calls (chat turns / handoff
+        /// spawns / editor round-trips). Overrides
+        /// `defaults.ai_concurrency` (default 4) for this run.
+        #[arg(long = "ai-concurrency", value_name = "N")]
+        ai_concurrency: Option<usize>,
     },
 
     /// Show what would change if `apply` were to run.
@@ -200,6 +210,11 @@ pub enum Command {
         /// manifest's declared mode (default `chat`).
         #[arg(long = "ai-mode", value_enum, value_name = "MODE")]
         ai_mode: Option<AiModeArg>,
+        /// Maximum concurrent AI calls (chat turns / handoff
+        /// spawns / editor round-trips). Overrides
+        /// `defaults.ai_concurrency` (default 4) for this run.
+        #[arg(long = "ai-concurrency", value_name = "N")]
+        ai_concurrency: Option<usize>,
     },
 
     /// Drop a template from this project's applied state.
@@ -266,6 +281,7 @@ impl Cli {
                 yes,
                 ai_prompt,
                 ai_mode,
+                ai_concurrency,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
                 cmd::init::run(
@@ -277,6 +293,7 @@ impl Cli {
                     yes,
                     ai_prompt,
                     ai_mode.map(Into::into),
+                    ai_concurrency,
                     interactive,
                     no_color,
                 )
@@ -291,6 +308,7 @@ impl Cli {
                 yes,
                 ai_prompt,
                 ai_mode,
+                ai_concurrency,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
                 cmd::apply::run(
@@ -302,6 +320,7 @@ impl Cli {
                     yes,
                     ai_prompt,
                     ai_mode.map(Into::into),
+                    ai_concurrency,
                     interactive,
                     no_color,
                 )
@@ -318,6 +337,7 @@ impl Cli {
                 yes,
                 ai_prompt,
                 ai_mode,
+                ai_concurrency,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
                 cmd::add::run(
@@ -330,6 +350,7 @@ impl Cli {
                     yes,
                     ai_prompt,
                     ai_mode.map(Into::into),
+                    ai_concurrency,
                     interactive,
                     no_color,
                 )
