@@ -72,3 +72,57 @@ pub fn print_pj_header(name: &str, path: &str, no_color: bool) {
         println!("\n{name} ({path})");
     }
 }
+
+/// Bold-render a row of column headers, padding each to its width.
+/// `width = 0` means "trailing cell, no padding". Caller is
+/// responsible for filtering cells they want to omit (e.g. the
+/// PATH column under a `--paths` opt-out).
+pub fn print_table_header(cells: &[(&str, usize)], no_color: bool) {
+    let parts: Vec<String> = cells
+        .iter()
+        .map(|(label, width)| {
+            let cell = if *width == 0 {
+                (*label).to_string()
+            } else {
+                format!("{:<w$}", label, w = *width)
+            };
+            if color_enabled(no_color) {
+                cell.bold().to_string()
+            } else {
+                cell
+            }
+        })
+        .collect();
+    println!("{}", parts.join("  "));
+}
+
+/// Colour the STATUS cell (trailing column on `kata list --all` /
+/// `kata status --all`). Shared so both commands stay consistent.
+pub fn format_status_cell(s: &str, no_color: bool) -> String {
+    if !color_enabled(no_color) {
+        return s.to_string();
+    }
+    match s {
+        "ok" => s.green().to_string(),
+        "drift" => s.yellow().bold().to_string(),
+        "not init'd" => s.cyan().to_string(),
+        s if s.starts_with("error") || s == "missing dir" => s.red().bold().to_string(),
+        _ => s.to_string(),
+    }
+}
+
+/// Colour the DRIFT summary cell (used by `kata status --all`),
+/// padded to `width`.
+pub fn format_drift_cell(s: &str, width: usize, no_color: bool) -> String {
+    let padded = format!("{:<w$}", s, w = width);
+    if !color_enabled(no_color) {
+        return padded;
+    }
+    if s == "clean" {
+        padded.green().to_string()
+    } else if s.contains("drifted") {
+        padded.yellow().to_string()
+    } else {
+        padded
+    }
+}

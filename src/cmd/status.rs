@@ -105,13 +105,12 @@ fn run_all(tags: Vec<String>, show_paths: bool, no_color: bool) -> Result<()> {
         .unwrap_or(5)
         .max(5);
 
-    print_header(&[
-        ("NAME", name_w),
-        ("PATH", path_w),
-        ("TRACKED", tracked_w),
-        ("DRIFT", drift_w),
-        ("STATUS", 0),
-    ], show_paths, color);
+    let mut header: Vec<(&str, usize)> = vec![("NAME", name_w)];
+    if show_paths {
+        header.push(("PATH", path_w));
+    }
+    header.extend([("TRACKED", tracked_w), ("DRIFT", drift_w), ("STATUS", 0)]);
+    ui::print_table_header(&header, no_color);
 
     for r in &rows {
         let mut cells = vec![format!("{:<name_w$}", r.name, name_w = name_w)];
@@ -124,13 +123,9 @@ fn run_all(tags: Vec<String>, show_paths: bool, no_color: bool) -> Result<()> {
                 format!("{:<path_w$}", r.path, path_w = path_w)
             });
         }
-        cells.push(format!(
-            "{:<tracked_w$}",
-            r.tracked,
-            tracked_w = tracked_w
-        ));
-        cells.push(format_drift_summary(&r.drift_summary, drift_w, color));
-        cells.push(format_status(&r.status, color));
+        cells.push(format!("{:<tracked_w$}", r.tracked, tracked_w = tracked_w));
+        cells.push(ui::format_drift_cell(&r.drift_summary, drift_w, no_color));
+        cells.push(ui::format_status_cell(&r.status, no_color));
         println!("{}", cells.join("  "));
 
         for line in &r.drift_detail {
@@ -142,55 +137,6 @@ fn run_all(tags: Vec<String>, show_paths: bool, no_color: bool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Print the bold-but-uncoloured table header, optionally
-/// dropping the PATH column.
-fn print_header(cells: &[(&str, usize)], show_paths: bool, color: bool) {
-    let mut parts = Vec::with_capacity(cells.len());
-    for (label, width) in cells {
-        if !show_paths && *label == "PATH" {
-            continue;
-        }
-        let cell = if *width == 0 {
-            (*label).to_string()
-        } else {
-            format!("{:<w$}", label, w = *width)
-        };
-        parts.push(if color {
-            cell.bold().to_string()
-        } else {
-            cell
-        });
-    }
-    println!("{}", parts.join("  "));
-}
-
-fn format_status(s: &str, color: bool) -> String {
-    if !color {
-        return s.to_string();
-    }
-    match s {
-        "ok" => s.green().to_string(),
-        "drift" => s.yellow().bold().to_string(),
-        "not init'd" => s.cyan().to_string(),
-        s if s.starts_with("error") || s == "missing dir" => s.red().bold().to_string(),
-        _ => s.to_string(),
-    }
-}
-
-fn format_drift_summary(s: &str, width: usize, color: bool) -> String {
-    let padded = format!("{:<w$}", s, w = width);
-    if !color {
-        return padded;
-    }
-    if s == "clean" {
-        padded.green().to_string()
-    } else if s.contains("drifted") {
-        padded.yellow().to_string()
-    } else {
-        padded
-    }
 }
 
 struct DriftRow {

@@ -2,6 +2,8 @@
 //! with `--all`, walk the global registry and emit a one-row-per-PJ
 //! overview instead.
 
+use std::fmt;
+
 use camino::Utf8PathBuf;
 use owo_colors::OwoColorize;
 
@@ -89,18 +91,17 @@ fn run_all(show_paths: bool, no_color: bool) -> Result<()> {
         .unwrap_or(7)
         .max(7);
 
-    print_header(
-        &[
-            ("NAME", name_w),
-            ("PATH", path_w),
-            ("PRESET", preset_w),
-            ("TEMPLATES", templates_w),
-            ("APPLIED", applied_w),
-            ("STATUS", 0),
-        ],
-        show_paths,
-        color,
-    );
+    let mut header: Vec<(&str, usize)> = vec![("NAME", name_w)];
+    if show_paths {
+        header.push(("PATH", path_w));
+    }
+    header.extend([
+        ("PRESET", preset_w),
+        ("TEMPLATES", templates_w),
+        ("APPLIED", applied_w),
+        ("STATUS", 0),
+    ]);
+    ui::print_table_header(&header, no_color);
     for r in &rows {
         let mut cells = vec![format!("{:<name_w$}", r.name, name_w = name_w)];
         if show_paths {
@@ -131,41 +132,23 @@ fn run_all(show_paths: bool, no_color: bool) -> Result<()> {
         } else {
             format!("{:<applied_w$}", r.applied_at, applied_w = applied_w)
         });
-        cells.push(format_status(&r.status, color));
+        cells.push(ui::format_status_cell(&r.status, no_color));
         println!("{}", cells.join("  "));
     }
     Ok(())
 }
 
-fn print_header(cells: &[(&str, usize)], show_paths: bool, color: bool) {
-    let mut parts = Vec::with_capacity(cells.len());
-    for (label, width) in cells {
-        if !show_paths && *label == "PATH" {
-            continue;
-        }
-        let cell = if *width == 0 {
-            (*label).to_string()
-        } else {
-            format!("{:<w$}", label, w = *width)
-        };
-        parts.push(if color {
-            cell.bold().to_string()
-        } else {
-            cell
-        });
-    }
-    println!("{}", parts.join("  "));
+/// Menu row for the `kata list` registry-fallback prompt. Keeping
+/// `Utf8PathBuf` here means we can pull `path` out of the chosen
+/// item directly — no separate label vector or O(N) lookup.
+struct ProjectChoice {
+    name: String,
+    path: Utf8PathBuf,
 }
 
-fn format_status(s: &str, color: bool) -> String {
-    if !color {
-        return s.to_string();
-    }
-    match s {
-        "ok" => s.green().to_string(),
-        "not init'd" => s.cyan().to_string(),
-        s if s.starts_with("error") || s == "missing dir" => s.red().bold().to_string(),
-        _ => s.to_string(),
+impl fmt::Display for ProjectChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}  ({})", self.name, self.path)
     }
 }
 
@@ -182,14 +165,19 @@ fn run_single_pick_from_registry(no_color: bool) -> Result<()> {
                 .into(),
         ));
     }
-    // Disambiguate by path so two PJs with the same `name` don't
-    // collapse into one menu entry.
-    let labels: Vec<String> = config
+    // Build choices that own their path so the `inquire::Select`
+    // result hands back what we need without a label round-trip.
+    // Disambiguating display includes the path so two PJs with the
+    // same `name` don't collapse into one menu entry.
+    let choices: Vec<ProjectChoice> = config
         .projects
-        .iter()
-        .map(|p| format!("{}  ({})", p.name, p.path))
+        .into_iter()
+        .map(|p| ProjectChoice {
+            name: p.name,
+            path: p.path,
+        })
         .collect();
-    let chosen = inquire::Select::new("pick a project to inspect:", labels.clone())
+    let chosen = inquire::Select::new("pick a project to inspect:", choices)
         .with_help_message("\u{2191}\u{2193} to move, Enter to confirm, Esc to cancel")
         .prompt()
         .map_err(|e| match e {
@@ -197,12 +185,7 @@ fn run_single_pick_from_registry(no_color: bool) -> Result<()> {
             | inquire::InquireError::OperationInterrupted => Error::Config("cancelled".into()),
             other => Error::Config(format!("prompt failed: {other}")),
         })?;
-    let idx = labels
-        .iter()
-        .position(|l| l == &chosen)
-        .expect("chosen label must come from labels");
-    let selected = config.projects[idx].path.clone();
-    run_single(Some(selected), no_color)
+    run_single(Some(chosen.path), no_color)
 }
 
 struct RegistryRow {
