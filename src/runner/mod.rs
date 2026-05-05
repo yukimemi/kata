@@ -295,7 +295,12 @@ fn eval_truthy(renderer: &mut Renderer, expr: &str, ctx: &tera::Context) -> Resu
     Ok(out.trim() == "1")
 }
 
-fn hash_content(b: &[u8]) -> String {
+/// SHA-256 of `b` as a lowercase hex string. Used both at apply
+/// time (record on `FileState.content_hash`) and at status time
+/// (compare against the on-disk bytes to detect drift). Public
+/// so `cmd::status` can re-compute on demand without going
+/// through the full apply pipeline.
+pub fn hash_content(b: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(b);
