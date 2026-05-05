@@ -12,7 +12,7 @@ use std::sync::Arc;
 use camino::Utf8PathBuf;
 use jiff::Timestamp;
 
-use crate::ai::AiAgent;
+use crate::ai::{AiAgent, Backend};
 use crate::applied::{AppliedState, AppliedTemplate};
 use crate::config::ProjectEntry;
 use crate::error::{Error, Result};
@@ -37,6 +37,15 @@ pub struct PjApplyOptions {
     /// chezmoi-style per-file dialog (Phase 3-b3) flips this on
     /// per-file once the user picks `[a]ccept`.
     pub yes_all: bool,
+    /// `--ai-prompt <msg>`: extra free-form instruction prepended
+    /// to every `how = "ai"` request for this run (e.g. "respond
+    /// in Japanese", "always keep my Section X"). `None` when not
+    /// passed.
+    pub ai_prompt: Option<String>,
+    /// Backend the agent (if any) is using. Mirrored into the
+    /// `ActionContext` so `[h]andoff` can spawn the CLI directly
+    /// rather than going through the `AiAgent` trait.
+    pub agent_backend: Option<Backend>,
 }
 
 #[derive(Debug)]
@@ -183,8 +192,10 @@ pub async fn apply_to_pj(
                 vars: &vars,
                 tera_ctx: &ctx,
                 agent: agent.clone(),
+                agent_backend: opts.agent_backend,
                 interactive: opts.interactive,
                 yes_all: opts.yes_all,
+                ai_prompt: opts.ai_prompt.as_deref(),
             };
 
             let outcome = match mode.execute(&action_ctx, opts.dry_run).await {
@@ -369,8 +380,10 @@ pub async fn plan_pj(
                 vars: &vars,
                 tera_ctx: &ctx,
                 agent: None,
+                agent_backend: None,
                 interactive,
                 yes_all: false,
+                ai_prompt: None,
             };
             let plan = mode.plan(&action_ctx).await?;
             out.push((dst_rel, plan.kind, plan.diff));

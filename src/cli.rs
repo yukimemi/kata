@@ -91,6 +91,12 @@ pub enum Command {
         /// Accept AI-generated bodies non-interactively.
         #[arg(long)]
         yes: bool,
+        /// Free-form instruction prepended to every `how = "ai"`
+        /// request for this run (e.g. "respond in Japanese", "always
+        /// keep my custom Section X"). Stacks on top of the per-file
+        /// `prompt` from the manifest.
+        #[arg(long = "ai-prompt", value_name = "MSG")]
+        ai_prompt: Option<String>,
     },
 
     /// Re-apply this project's templates against the recorded state.
@@ -114,6 +120,12 @@ pub enum Command {
         /// Accept AI-generated bodies non-interactively.
         #[arg(long)]
         yes: bool,
+        /// Free-form instruction prepended to every `how = "ai"`
+        /// request for this run (e.g. "respond in Japanese", "always
+        /// keep my custom Section X"). Stacks on top of the per-file
+        /// `prompt` from the manifest.
+        #[arg(long = "ai-prompt", value_name = "MSG")]
+        ai_prompt: Option<String>,
     },
 
     /// Show what would change if `apply` were to run.
@@ -143,6 +155,12 @@ pub enum Command {
         /// Accept AI-generated bodies non-interactively.
         #[arg(long)]
         yes: bool,
+        /// Free-form instruction prepended to every `how = "ai"`
+        /// request for this run (e.g. "respond in Japanese", "always
+        /// keep my custom Section X"). Stacks on top of the per-file
+        /// `prompt` from the manifest.
+        #[arg(long = "ai-prompt", value_name = "MSG")]
+        ai_prompt: Option<String>,
     },
 
     /// Drop a template from this project's applied state.
@@ -207,9 +225,21 @@ impl Cli {
                 ai,
                 no_ai,
                 yes,
+                ai_prompt,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
-                cmd::init::run(preset, at, vars, kind, no_ai, yes, interactive, no_color).await
+                cmd::init::run(
+                    preset,
+                    at,
+                    vars,
+                    kind,
+                    no_ai,
+                    yes,
+                    ai_prompt,
+                    interactive,
+                    no_color,
+                )
+                .await
             }
             Command::Apply {
                 at,
@@ -218,9 +248,21 @@ impl Cli {
                 ai,
                 no_ai,
                 yes,
+                ai_prompt,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
-                cmd::apply::run(at, dry_run, vars, kind, no_ai, yes, interactive, no_color).await
+                cmd::apply::run(
+                    at,
+                    dry_run,
+                    vars,
+                    kind,
+                    no_ai,
+                    yes,
+                    ai_prompt,
+                    interactive,
+                    no_color,
+                )
+                .await
             }
             Command::Status { at } => cmd::status::run(at, interactive, no_color).await,
             Command::Add {
@@ -231,6 +273,7 @@ impl Cli {
                 ai,
                 no_ai,
                 yes,
+                ai_prompt,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
                 cmd::add::run(
@@ -241,6 +284,7 @@ impl Cli {
                     kind,
                     no_ai,
                     yes,
+                    ai_prompt,
                     interactive,
                     no_color,
                 )

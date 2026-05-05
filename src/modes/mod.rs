@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::ai::AiAgent;
+use crate::ai::{AiAgent, Backend};
 use crate::applied::Decision;
 use crate::config::ProjectEntry;
 use crate::error::Result;
@@ -47,11 +47,21 @@ pub struct ActionContext<'a> {
     pub tera_ctx: &'a tera::Context,
     /// Resolved AI agent (only meaningful for `how = "ai"`).
     pub agent: Option<Arc<dyn AiAgent>>,
+    /// Backend the agent (if any) is using. The `[h]andoff` arm in
+    /// `modes/ai.rs` needs this to call `ai::process::run_handoff`,
+    /// which spawns the CLI directly rather than going through the
+    /// `AiAgent` trait. Always `Some` whenever `agent` is `Some`.
+    pub agent_backend: Option<Backend>,
     pub interactive: bool,
     /// `--yes` accepts AI-generated bodies non-interactively. The
     /// chezmoi-style per-file dialog (Phase 3-b3) flips this on
     /// per-file once the user picks `[a]ccept`.
     pub yes_all: bool,
+    /// `--ai-prompt <msg>`: extra free-form instruction the user
+    /// asks kata to prepend to every `how = "ai"` request. Useful
+    /// for "always keep my Section X" / "respond in Japanese" /
+    /// session-wide guidance. None when not provided.
+    pub ai_prompt: Option<&'a str>,
 }
 
 /// What a mode reports during `plan` (read-only preview).

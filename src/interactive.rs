@@ -1,33 +1,39 @@
 //! Inquire-based interactive prompts. Hosts the var prompter and
-//! the chezmoi-style `[a]ccept / [c]hat / [s]kip / [d]efer` AI
-//! decision dialog used by `modes/ai.rs`. The `[e]dit` and
-//! `[h]andoff` choices land with Phase 3-b4 (CLAUDE.md: "AI
-//! delegation MVP", split for PR-size hygiene).
+//! the chezmoi-style `[a]ccept / [e]dit / [c]hat / [h]andoff /
+//! [s]kip / [d]efer` AI decision dialog used by `modes/ai.rs`.
 
 use crate::error::{Error, Result};
 use crate::manifest::VarSpec;
 
-/// What the user picked for an AI-produced body. Mirrors the
-/// chezmoi flow but with `[c]hat` replacing chezmoi's `[e]dit`
-/// because the kata pattern is "let the AI try again, here's what
-/// to fix" rather than "I'll edit it myself" (the explicit edit
-/// path is a Phase 3-b4 follow-up).
+/// What the user picked for an AI-produced body. The shape mirrors
+/// chezmoi's `[a]ccept / [e]dit / [s]kip / [d]efer` plus two
+/// kata-specific arms: `[c]hat` ("ask the AI again with this
+/// hint") and `[h]andoff` ("escape hatch — drop me into the agent
+/// CLI and stop re-importing").
 #[derive(Debug, Clone)]
 pub enum AiDecision {
     /// Write the AI's body to disk.
     Accept,
+    /// Open the AI body in `$EDITOR` and write the user's edited
+    /// version. No further AI calls.
+    Edit,
     /// Hand the AI a one-line refinement and re-run. The string is
     /// the user's instruction, e.g. "make it shorter".
     Chat(String),
+    /// Spawn the agent CLI interactively. kata stops re-importing —
+    /// the agent's own Edit / Write tools take over from here.
+    Handoff,
     /// Skip this round; do not record a `defer`.
     Skip,
     /// Skip this round but ask again on the next apply.
     Defer,
 }
 
-const CHOICES: [&str; 4] = [
+const CHOICES: [&str; 6] = [
     "[a]ccept   write the AI body to disk",
+    "[e]dit     open the body in $EDITOR before writing",
     "[c]hat     give the AI a one-line refinement and try again",
+    "[h]andoff  open the agent CLI interactively (kata stops re-importing)",
     "[s]kip     skip this round (do not retry next apply)",
     "[d]efer    skip this round but ask again next apply",
 ];
@@ -56,6 +62,12 @@ pub fn prompt_ai_decision(dst: &str) -> Result<AiDecision> {
     if starts_with('a') {
         return Ok(AiDecision::Accept);
     }
+    if starts_with('e') {
+        return Ok(AiDecision::Edit);
+    }
+    if starts_with('h') {
+        return Ok(AiDecision::Handoff);
+    }
     if starts_with('s') {
         return Ok(AiDecision::Skip);
     }
@@ -77,7 +89,7 @@ pub fn prompt_ai_decision(dst: &str) -> Result<AiDecision> {
         };
         return Ok(AiDecision::Chat(instr));
     }
-    // Should be unreachable given the four-element CHOICES list,
+    // Should be unreachable given the six-element CHOICES list,
     // but be defensive — prefer Defer over panicking on an
     // unexpected option string.
     Ok(AiDecision::Defer)

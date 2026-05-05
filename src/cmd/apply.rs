@@ -5,7 +5,7 @@
 
 use camino::Utf8PathBuf;
 
-use crate::ai::agent_for_kind;
+use crate::ai::{agent_for_kind, resolve_backend};
 use crate::applied::AppliedState;
 use crate::config::ProjectEntry;
 use crate::error::{Error, Result};
@@ -24,6 +24,7 @@ pub async fn run(
     ai_kind: AgentKind,
     no_ai: bool,
     yes: bool,
+    ai_prompt: Option<String>,
     interactive: bool,
     no_color: bool,
 ) -> Result<()> {
@@ -61,15 +62,6 @@ pub async fn run(
         overrides: None,
     };
 
-    let opts = PjApplyOptions {
-        dry_run,
-        no_ai,
-        interactive,
-        cli_vars: parse_cli_vars(vars)?,
-        force_once: false,
-        yes_all: yes,
-    };
-
     // Re-resolve relative template sources against the base_dir
     // recorded at init time. Without this, `source = "../pj-base"`
     // would be resolved against cwd and fail (Phase 1 bug B from the
@@ -77,6 +69,22 @@ pub async fn run(
     let base_dir = applied.base_dir.clone().unwrap_or(cwd);
 
     let agent = if no_ai { None } else { agent_for_kind(ai_kind) };
+    let agent_backend = if no_ai {
+        None
+    } else {
+        resolve_backend(ai_kind)
+    };
+
+    let opts = PjApplyOptions {
+        dry_run,
+        no_ai,
+        interactive,
+        cli_vars: parse_cli_vars(vars)?,
+        force_once: false,
+        yes_all: yes,
+        ai_prompt,
+        agent_backend,
+    };
     let result = apply_to_pj(
         project,
         pj_root.clone(),
