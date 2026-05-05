@@ -24,3 +24,7 @@ Cargo.lock.bak
 .DS_Store
 Thumbs.db
 # kata:gitignore:base:end
+
+
+# APM dependencies
+apm_modules/
