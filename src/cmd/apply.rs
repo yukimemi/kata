@@ -14,7 +14,7 @@ use crate::preset::TemplateRef;
 use crate::runner::{PjApplyOptions, apply_to_pj};
 use crate::ui;
 
-use super::{parse_cli_vars, resolve_pj_root};
+use super::{parse_cli_vars, resolve_ai_concurrency, resolve_pj_root};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -26,6 +26,7 @@ pub async fn run(
     yes: bool,
     ai_prompt: Option<String>,
     ai_mode_override: Option<AiMode>,
+    ai_concurrency_override: Option<usize>,
     interactive: bool,
     no_color: bool,
 ) -> Result<()> {
@@ -76,6 +77,8 @@ pub async fn run(
         resolve_backend(ai_kind)
     };
 
+    let ai_concurrency = resolve_ai_concurrency(ai_concurrency_override);
+
     let opts = PjApplyOptions {
         dry_run,
         no_ai,
@@ -86,6 +89,7 @@ pub async fn run(
         ai_prompt,
         agent_backend,
         ai_mode_override,
+        ai_concurrency,
     };
     let result = apply_to_pj(
         project,

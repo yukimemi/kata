@@ -57,6 +57,27 @@ pub(crate) fn ensure_state_dir(root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
+/// Hard-coded floor for `defaults.ai_concurrency`. Mirrors
+/// `config::default_ai_concurrency`. Kept here so the cmd layer
+/// has a single place to reach for it without depending on
+/// internals of `config`.
+const DEFAULT_AI_CONCURRENCY: usize = 4;
+
+/// Resolve the AI concurrency cap for one apply run: CLI override
+/// wins, otherwise read `defaults.ai_concurrency` from the global
+/// config, otherwise fall back to `DEFAULT_AI_CONCURRENCY`. A
+/// hard-edited config that returns `Err` (missing / malformed)
+/// silently falls through to the default — Phase 1 already
+/// surfaces config problems through other paths, no need to fail
+/// the apply for an unrelated read error.
+pub(crate) fn resolve_ai_concurrency(cli_override: Option<usize>) -> usize {
+    cli_override.unwrap_or_else(|| {
+        crate::config::GlobalConfig::load()
+            .map(|c| c.defaults.ai_concurrency)
+            .unwrap_or(DEFAULT_AI_CONCURRENCY)
+    })
+}
+
 pub mod doctor_helpers {
     use std::process::Command;
 

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use camino::Utf8PathBuf;
 use jiff::Timestamp;
+use tokio::sync::Semaphore;
 
 use crate::ai::{AiAgent, Backend};
 use crate::applied::{AppliedState, AppliedTemplate};
@@ -52,6 +53,12 @@ pub struct PjApplyOptions {
     /// interactively. `None` honours each manifest's `ai_mode`
     /// (default `Chat`).
     pub ai_mode_override: Option<AiMode>,
+    /// Maximum concurrent AI calls (chat turns / handoff spawns /
+    /// editor round-trips). Sourced from
+    /// `defaults.ai_concurrency` (default 4) but overridable per
+    /// run via `--ai-concurrency <N>`. Capped to >= 1 so a 0
+    /// from a hand-edited config doesn't deadlock the apply.
+    pub ai_concurrency: usize,
 }
 
 #[derive(Debug)]
@@ -83,6 +90,12 @@ pub async fn apply_to_pj(
     agent: Option<Arc<dyn AiAgent>>,
 ) -> Result<PjApplyResult> {
     let mut applied = AppliedState::load(&pj_root)?;
+
+    // Global AI gate. We always create one so `ActionContext` can
+    // borrow it unconditionally; the cap is `opts.ai_concurrency`
+    // (default 4 from `defaults.ai_concurrency`). A 0 from a hand-
+    // edited config would deadlock acquire(), so floor at 1.
+    let ai_sema = Arc::new(Semaphore::new(opts.ai_concurrency.max(1)));
 
     // 1. Load all template handles (so we can union their var specs
     //    before prompting).
@@ -203,6 +216,7 @@ pub async fn apply_to_pj(
                 yes_all: opts.yes_all,
                 ai_prompt: opts.ai_prompt.as_deref(),
                 ai_mode_override: opts.ai_mode_override,
+                ai_sema: ai_sema.clone(),
             };
 
             let outcome = match mode.execute(&action_ctx, opts.dry_run).await {
@@ -308,6 +322,12 @@ pub async fn plan_pj(
 ) -> Result<Vec<(String, crate::modes::PlanKind, Option<String>)>> {
     let applied = AppliedState::load(&pj_root)?;
 
+    // Plan never invokes the agent, but `ActionContext` requires a
+    // semaphore. Build a single 1-permit sema for the whole plan
+    // and clone the `Arc` per file rather than allocating one
+    // semaphore per `[[file]]` entry.
+    let plan_sema = Arc::new(Semaphore::new(1));
+
     let mut handles: Vec<TemplateHandle> = Vec::with_capacity(templates.len());
     for t in &templates {
         handles.push(TemplateHandle::load(t, &base_dir).await?);
@@ -392,6 +412,7 @@ pub async fn plan_pj(
                 yes_all: false,
                 ai_prompt: None,
                 ai_mode_override: None,
+                ai_sema: plan_sema.clone(),
             };
             let plan = mode.plan(&action_ctx).await?;
             out.push((dst_rel, plan.kind, plan.diff));
