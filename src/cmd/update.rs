@@ -192,9 +192,18 @@ async fn update_one_at(
             continue;
         }
 
+        // No `--rev` → follow the upstream's default branch.
+        // `HEAD` here would resolve to the **local** HEAD of the
+        // cache slot (kata clones leave the slot in detached-HEAD
+        // state, frozen at the last-applied SHA), so a plain
+        // `git fetch && git checkout HEAD` is a no-op even when
+        // origin has moved on. `origin/HEAD` is the symref
+        // `git clone` sets up pointing at the remote's default
+        // branch tip; checking it out post-fetch is what actually
+        // advances the cache.
         let target = match rev_override {
             Some(r) => r.clone(),
-            None => "HEAD".to_string(),
+            None => "origin/HEAD".to_string(),
         };
         if let Err(e) = git::checkout(slot.as_path(), &target).await {
             report.push(format!("FAIL {}: {e}", tmpl.source));
