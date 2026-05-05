@@ -10,16 +10,6 @@ Cargo.lock.bak
 /.kata/
 !/.kata/applied.toml
 
-# Editor
-.idea/
-.vscode/
-*.swp
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
 # APM compiled outputs (committed for visibility once apm.yml exists)
 # Uncomment if we change strategy:
 # /.claude/skills/
