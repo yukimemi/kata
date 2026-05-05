@@ -91,11 +91,11 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Bootstrap a new project from a preset (Phase 1 supports
-    /// local presets only).
+    /// Bootstrap a new project from a preset.
     Init {
         /// Preset spec: `<source>[@<rev>][//<subdir>][:<preset-name>]`.
-        /// For Phase 1 use a local path or a path to a `.toml` file.
+        /// `<source>` is a git URL (e.g. `github.com/owner/repo`) or
+        /// a local path; `<preset-name>` defaults to `default`.
         preset: String,
         /// Project root (defaults to cwd).
         #[arg(long, value_name = "DIR")]
@@ -297,9 +297,9 @@ pub enum Command {
 
     /// Add a project to the global registry
     /// (`~/.config/kata/config.toml`). Optional `--name` defaults
-    /// to the upstream repo basename; `--tags` are repeatable
-    /// labels for filtering with `kata apply --all --tag <t>`
-    /// (Phase 5-b).
+    /// to the upstream repo basename; `--tag` is a repeatable
+    /// label for filtering with `kata apply --all --tag <t>` (and
+    /// the equivalent `update --all` / `status --all`).
     Register {
         #[arg(value_name = "PATH")]
         path: Option<Utf8PathBuf>,
