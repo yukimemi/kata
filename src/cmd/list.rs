@@ -2,28 +2,37 @@
 //! with `--all`, walk the global registry and emit a one-row-per-PJ
 //! overview instead.
 
+use std::fmt;
+
 use camino::Utf8PathBuf;
+use owo_colors::OwoColorize;
 
 use crate::applied::AppliedState;
 use crate::config::GlobalConfig;
 use crate::error::{Error, Result};
+use crate::ui;
 
 use super::resolve_pj_root;
 
-pub fn run(at: Option<Utf8PathBuf>, all: bool, no_color: bool) -> Result<()> {
+pub fn run(at: Option<Utf8PathBuf>, all: bool, paths: bool, no_color: bool) -> Result<()> {
     if all {
-        return run_all(no_color);
+        return run_all(paths, no_color);
     }
     run_single(at, no_color)
 }
 
-fn run_single(at: Option<Utf8PathBuf>, _no_color: bool) -> Result<()> {
+fn run_single(at: Option<Utf8PathBuf>, no_color: bool) -> Result<()> {
+    let explicit_at = at.is_some();
     let cwd = resolve_pj_root(at)?;
-    let pj_root = crate::paths::find_pj_root(&cwd).ok_or_else(|| {
-        Error::Config(format!(
-            "no .kata/applied.toml found at or above {cwd}; run `kata init` first"
-        ))
-    })?;
+    let pj_root = match crate::paths::find_pj_root(&cwd) {
+        Some(p) => p,
+        None if explicit_at => {
+            return Err(Error::Config(format!(
+                "no .kata/applied.toml found at or above {cwd}; run `kata init` first"
+            )));
+        }
+        None => return run_single_pick_from_registry(no_color),
+    };
     let applied = AppliedState::load(&pj_root)?;
 
     println!("project: {pj_root}");
@@ -50,7 +59,7 @@ fn run_single(at: Option<Utf8PathBuf>, _no_color: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_all(_no_color: bool) -> Result<()> {
+fn run_all(show_paths: bool, no_color: bool) -> Result<()> {
     let config = GlobalConfig::load()?;
     if config.projects.is_empty() {
         println!(
@@ -64,6 +73,7 @@ fn run_all(_no_color: bool) -> Result<()> {
         .iter()
         .map(RegistryRow::from_entry)
         .collect();
+    let color = ui::color_enabled(no_color);
 
     let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
     let path_w = rows.iter().map(|r| r.path.len()).max().unwrap_or(4).max(4);
@@ -81,36 +91,101 @@ fn run_all(_no_color: bool) -> Result<()> {
         .unwrap_or(7)
         .max(7);
 
-    println!(
-        "{:<name_w$}  {:<path_w$}  {:<preset_w$}  {:<templates_w$}  {:<applied_w$}  STATUS",
-        "NAME",
-        "PATH",
-        "PRESET",
-        "TEMPLATES",
-        "APPLIED",
-        name_w = name_w,
-        path_w = path_w,
-        preset_w = preset_w,
-        templates_w = templates_w,
-        applied_w = applied_w,
-    );
+    let mut header: Vec<(&str, usize)> = vec![("NAME", name_w)];
+    if show_paths {
+        header.push(("PATH", path_w));
+    }
+    header.extend([
+        ("PRESET", preset_w),
+        ("TEMPLATES", templates_w),
+        ("APPLIED", applied_w),
+        ("STATUS", 0),
+    ]);
+    ui::print_table_header(&header, no_color);
     for r in &rows {
-        println!(
-            "{:<name_w$}  {:<path_w$}  {:<preset_w$}  {:<templates_w$}  {:<applied_w$}  {}",
-            r.name,
-            r.path,
-            r.preset,
+        let mut cells = vec![format!("{:<name_w$}", r.name, name_w = name_w)];
+        if show_paths {
+            cells.push(if color {
+                format!("{:<path_w$}", r.path, path_w = path_w)
+                    .dimmed()
+                    .to_string()
+            } else {
+                format!("{:<path_w$}", r.path, path_w = path_w)
+            });
+        }
+        cells.push(if color {
+            format!("{:<preset_w$}", r.preset, preset_w = preset_w)
+                .dimmed()
+                .to_string()
+        } else {
+            format!("{:<preset_w$}", r.preset, preset_w = preset_w)
+        });
+        cells.push(format!(
+            "{:<templates_w$}",
             r.templates,
-            r.applied_at,
-            r.status,
-            name_w = name_w,
-            path_w = path_w,
-            preset_w = preset_w,
-            templates_w = templates_w,
-            applied_w = applied_w,
-        );
+            templates_w = templates_w
+        ));
+        cells.push(if color {
+            format!("{:<applied_w$}", r.applied_at, applied_w = applied_w)
+                .dimmed()
+                .to_string()
+        } else {
+            format!("{:<applied_w$}", r.applied_at, applied_w = applied_w)
+        });
+        cells.push(ui::format_status_cell(&r.status, no_color));
+        println!("{}", cells.join("  "));
     }
     Ok(())
+}
+
+/// Menu row for the `kata list` registry-fallback prompt. Keeping
+/// `Utf8PathBuf` here means we can pull `path` out of the chosen
+/// item directly — no separate label vector or O(N) lookup.
+struct ProjectChoice {
+    name: String,
+    path: Utf8PathBuf,
+}
+
+impl fmt::Display for ProjectChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}  ({})", self.name, self.path)
+    }
+}
+
+/// Fallback when `kata list` (no `--at`, no `--all`) is run from
+/// a directory with no `.kata/applied.toml` in its hierarchy: pull
+/// the global registry and offer an `inquire` select instead of
+/// erroring. Matches `renri list`'s pattern.
+fn run_single_pick_from_registry(no_color: bool) -> Result<()> {
+    let config = GlobalConfig::load()?;
+    if config.projects.is_empty() {
+        return Err(Error::Config(
+            "no .kata/applied.toml in the current directory's hierarchy and no projects in the global registry — \
+             cd into a kata-managed PJ, or run `kata init` first."
+                .into(),
+        ));
+    }
+    // Build choices that own their path so the `inquire::Select`
+    // result hands back what we need without a label round-trip.
+    // Disambiguating display includes the path so two PJs with the
+    // same `name` don't collapse into one menu entry.
+    let choices: Vec<ProjectChoice> = config
+        .projects
+        .into_iter()
+        .map(|p| ProjectChoice {
+            name: p.name,
+            path: p.path,
+        })
+        .collect();
+    let chosen = inquire::Select::new("pick a project to inspect:", choices)
+        .with_help_message("\u{2191}\u{2193} to move, Enter to confirm, Esc to cancel")
+        .prompt()
+        .map_err(|e| match e {
+            inquire::InquireError::OperationCanceled
+            | inquire::InquireError::OperationInterrupted => Error::Config("cancelled".into()),
+            other => Error::Config(format!("prompt failed: {other}")),
+        })?;
+    run_single(Some(chosen.path), no_color)
 }
 
 struct RegistryRow {

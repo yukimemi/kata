@@ -202,6 +202,10 @@ pub enum Command {
         /// Ignored without `--all`.
         #[arg(long = "tag", value_name = "TAG", requires = "all")]
         tags: Vec<String>,
+        /// Add an absolute-path column to `--all` output (off by
+        /// default to keep the table narrow).
+        #[arg(long, requires = "all")]
+        paths: bool,
     },
 
     /// Append a template to this project's applied state and apply.
@@ -283,9 +287,11 @@ pub enum Command {
     },
 
     /// List inventory. Without `--all`, prints what governs the
-    /// current PJ. With `--all`, walks the global registry and
-    /// shows a one-row-per-PJ overview (preset / templates /
-    /// last-applied / status).
+    /// current PJ. If invoked from a directory with no
+    /// `.kata/applied.toml` (and `--at` isn't given), pick from
+    /// the global registry interactively. With `--all`, walks the
+    /// registry and shows a one-row-per-PJ overview (preset /
+    /// templates / last-applied / status).
     List {
         #[arg(long, value_name = "DIR")]
         at: Option<Utf8PathBuf>,
@@ -293,6 +299,10 @@ pub enum Command {
         /// the current one.
         #[arg(long)]
         all: bool,
+        /// Add an absolute-path column to `--all` output (off by
+        /// default).
+        #[arg(long, requires = "all")]
+        paths: bool,
     },
 
     /// Add a project to the global registry
@@ -417,9 +427,12 @@ impl Cli {
                     .await
                 }
             }
-            Command::Status { at, all, tags } => {
-                cmd::status::run(at, all, tags, interactive, no_color).await
-            }
+            Command::Status {
+                at,
+                all,
+                tags,
+                paths,
+            } => cmd::status::run(at, all, tags, paths, interactive, no_color).await,
             Command::Add {
                 template,
                 rev,
@@ -464,7 +477,7 @@ impl Cli {
                     cmd::update::run(templates, rev, at, no_color).await
                 }
             }
-            Command::List { at, all } => cmd::list::run(at, all, no_color),
+            Command::List { at, all, paths } => cmd::list::run(at, all, paths, no_color),
             Command::Register { path, name, tags } => {
                 cmd::register::run(path, name, tags, no_color).await
             }

@@ -3,6 +3,7 @@
 //! global registry (every PJ kata knows about).
 
 use camino::{Utf8Path, Utf8PathBuf};
+use owo_colors::OwoColorize;
 
 use crate::applied::AppliedState;
 use crate::config::{GlobalConfig, ProjectEntry};
@@ -17,11 +18,12 @@ pub async fn run(
     at: Option<Utf8PathBuf>,
     all: bool,
     tags: Vec<String>,
+    paths: bool,
     interactive: bool,
     no_color: bool,
 ) -> Result<()> {
     if all {
-        return run_all(tags, no_color);
+        return run_all(tags, paths, no_color);
     }
     run_single(at, interactive, no_color).await
 }
@@ -76,7 +78,7 @@ async fn run_single(at: Option<Utf8PathBuf>, interactive: bool, no_color: bool) 
     Ok(())
 }
 
-fn run_all(tags: Vec<String>, _no_color: bool) -> Result<()> {
+fn run_all(tags: Vec<String>, show_paths: bool, no_color: bool) -> Result<()> {
     let config = GlobalConfig::load()?;
     let projects = select_registered_projects(&config, &tags);
     if projects.is_empty() {
@@ -91,6 +93,7 @@ fn run_all(tags: Vec<String>, _no_color: bool) -> Result<()> {
     }
 
     let rows: Vec<DriftRow> = projects.iter().map(DriftRow::from_entry).collect();
+    let color = ui::color_enabled(no_color);
 
     let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
     let path_w = rows.iter().map(|r| r.path.len()).max().unwrap_or(4).max(4);
@@ -102,33 +105,35 @@ fn run_all(tags: Vec<String>, _no_color: bool) -> Result<()> {
         .unwrap_or(5)
         .max(5);
 
-    println!(
-        "{:<name_w$}  {:<path_w$}  {:<tracked_w$}  {:<drift_w$}  STATUS",
-        "NAME",
-        "PATH",
-        "TRACKED",
-        "DRIFT",
-        name_w = name_w,
-        path_w = path_w,
-        tracked_w = tracked_w,
-        drift_w = drift_w,
-    );
+    let mut header: Vec<(&str, usize)> = vec![("NAME", name_w)];
+    if show_paths {
+        header.push(("PATH", path_w));
+    }
+    header.extend([("TRACKED", tracked_w), ("DRIFT", drift_w), ("STATUS", 0)]);
+    ui::print_table_header(&header, no_color);
 
     for r in &rows {
-        println!(
-            "{:<name_w$}  {:<path_w$}  {:<tracked_w$}  {:<drift_w$}  {}",
-            r.name,
-            r.path,
-            r.tracked,
-            r.drift_summary,
-            r.status,
-            name_w = name_w,
-            path_w = path_w,
-            tracked_w = tracked_w,
-            drift_w = drift_w,
-        );
+        let mut cells = vec![format!("{:<name_w$}", r.name, name_w = name_w)];
+        if show_paths {
+            cells.push(if color {
+                format!("{:<path_w$}", r.path, path_w = path_w)
+                    .dimmed()
+                    .to_string()
+            } else {
+                format!("{:<path_w$}", r.path, path_w = path_w)
+            });
+        }
+        cells.push(format!("{:<tracked_w$}", r.tracked, tracked_w = tracked_w));
+        cells.push(ui::format_drift_cell(&r.drift_summary, drift_w, no_color));
+        cells.push(ui::format_status_cell(&r.status, no_color));
+        println!("{}", cells.join("  "));
+
         for line in &r.drift_detail {
-            println!("    {line}");
+            if color {
+                println!("    {}", line.yellow());
+            } else {
+                println!("    {line}");
+            }
         }
     }
     Ok(())
