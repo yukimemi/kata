@@ -186,10 +186,22 @@ pub enum Command {
         pj_concurrency: Option<usize>,
     },
 
-    /// Show what would change if `apply` were to run.
+    /// Show what would change if `apply` were to run. Without
+    /// `--all`, walks the current PJ's templates and emits a
+    /// per-file plan. With `--all`, walks the global registry
+    /// and reports per-PJ drift (recorded `content_hash` vs
+    /// disk).
     Status {
         #[arg(long, value_name = "DIR")]
         at: Option<Utf8PathBuf>,
+        /// Walk every project in the global registry instead of
+        /// the current PJ. Conflicts with `--at`.
+        #[arg(long, conflicts_with = "at")]
+        all: bool,
+        /// Filter `--all` by tag (repeatable; intersection).
+        /// Ignored without `--all`.
+        #[arg(long = "tag", value_name = "TAG", requires = "all")]
+        tags: Vec<String>,
     },
 
     /// Append a template to this project's applied state and apply.
@@ -405,7 +417,9 @@ impl Cli {
                     .await
                 }
             }
-            Command::Status { at } => cmd::status::run(at, interactive, no_color).await,
+            Command::Status { at, all, tags } => {
+                cmd::status::run(at, all, tags, interactive, no_color).await
+            }
             Command::Add {
                 template,
                 rev,
