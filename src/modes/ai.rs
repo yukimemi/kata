@@ -318,7 +318,7 @@ fn compose_user_prompt(run_wide: Option<&str>, per_file: Option<&str>) -> String
 /// Open the AI-proposed `body` in the user's `$EDITOR` (or
 /// `$VISUAL`) for in-place editing, then return the saved result.
 /// The temp file extension matches the destination's so editors
-/// pick the right syntax mode (e.g. `.md` for CLAUDE.md merges).
+/// pick the right syntax mode (e.g. `.md` for AGENTS.md merges).
 fn edit_in_editor(dst_label: &str, body: &str) -> Result<String> {
     use std::io::Write as _;
 
@@ -460,20 +460,20 @@ mod tests {
     #[test]
     fn compose_user_prompt_returns_only_per_file_when_run_wide_missing() {
         assert_eq!(
-            compose_user_prompt(None, Some("merge CLAUDE.md")),
-            "merge CLAUDE.md"
+            compose_user_prompt(None, Some("merge AGENTS.md")),
+            "merge AGENTS.md"
         );
     }
 
     #[test]
     fn compose_user_prompt_combines_both_in_labelled_blocks() {
-        let out = compose_user_prompt(Some("be terse"), Some("merge CLAUDE.md"));
+        let out = compose_user_prompt(Some("be terse"), Some("merge AGENTS.md"));
         assert!(
             out.contains("[run-wide instruction]\nbe terse"),
             "missing run-wide block: {out}"
         );
         assert!(
-            out.contains("[per-file instruction]\nmerge CLAUDE.md"),
+            out.contains("[per-file instruction]\nmerge AGENTS.md"),
             "missing per-file block: {out}"
         );
     }

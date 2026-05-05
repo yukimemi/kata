@@ -1,4 +1,4 @@
-# Required-by-APM but intentionally static. Per CLAUDE.md "Version
+# Required-by-APM but intentionally static. Per AGENTS.md "Version
 # lives only in Cargo.toml"; this apm.yml is consumer-side and not
 # a publishable APM package, so the version below is a placeholder
 # that should never bump.

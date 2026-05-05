@@ -256,7 +256,7 @@ mod tests {
         let raw = r#"
             name = "demo"
             [[file]]
-            src = "CLAUDE.md"
+            src = "AGENTS.md"
             how = "ai"
             prompt = "merge"
         "#;
@@ -269,7 +269,7 @@ mod tests {
         let raw = r#"
             name = "demo"
             [[file]]
-            src = "CLAUDE.md"
+            src = "AGENTS.md"
             how = "ai"
             prompt = "merge"
             ai_mode = "handoff"
@@ -372,7 +372,7 @@ mod tests {
             when = "once"
 
             [[file]]
-            src = "CLAUDE.md"
+            src = "AGENTS.md"
             how = "ai"
             agent = "claude"
             prompt = "merge"

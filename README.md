@@ -14,16 +14,16 @@
 [ROADMAP.md](./ROADMAP.md) for what's next (git-fetched templates,
 `merge-section` / `merge-toml` / `merge-yaml` / `script` modes,
 AI delegation, multi-PJ parallelism). Design notes in
-[CLAUDE.md](./CLAUDE.md).**
+[AGENTS.md](./AGENTS.md).**
 
 ## Why
 
 Maintaining N sibling Rust / Go / Bun projects means every
 boilerplate change to `Makefile.toml` / `apm.yml` / `renri.toml`
-/ CI / `CLAUDE.md` has to be copy-pasted across all of them.
+/ CI / `AGENTS.md` has to be copy-pasted across all of them.
 Existing tools (copier, cookiecutter, cruft) cover the mechanical
 case but nothing handles files that need *judgement* on update —
-like `CLAUDE.md`, where each project has shared sections plus
+like `AGENTS.md`, where each project has shared sections plus
 project-specific ones.
 
 `kata` aims to:
@@ -77,7 +77,7 @@ kata list
 ```
 
 The `<source>:<preset-name>` syntax is the same Terraform-module-style
-spec [described in CLAUDE.md](./CLAUDE.md): `<source>[@<rev>][//<subdir>][:<preset-name>]`.
+spec [described in AGENTS.md](./AGENTS.md): `<source>[@<rev>][//<subdir>][:<preset-name>]`.
 
 ## Companion repos
 

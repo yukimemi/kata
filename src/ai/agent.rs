@@ -78,7 +78,7 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are kata, a multi-project template 
 pub fn format_prompt(req: &AiRequest) -> String {
     // Pre-size to "everything we'll write" + a small headroom for
     // the static tag wrappers / closing instruction. Keeps large
-    // CLAUDE.md / ROADMAP.md merges from triggering several
+    // AGENTS.md / ROADMAP.md merges from triggering several
     // reallocations.
     let mut buf = String::with_capacity(
         req.system_prompt.len()
@@ -157,7 +157,7 @@ pub fn extract_body(raw: &str) -> Option<String> {
 }
 
 /// Map the manifest-side `AgentKind` to a concrete `Backend`,
-/// resolving `Auto` against the user's PATH. CLAUDE.md fixes the
+/// resolving `Auto` against the user's PATH. AGENTS.md fixes the
 /// fallback order at **claude > codex > gemini**.
 pub fn resolve_backend(kind: AgentKind) -> Option<Backend> {
     match kind {
@@ -215,14 +215,14 @@ mod tests {
             current: current.map(|s| s.to_string()),
             incoming: incoming.to_string(),
             template_diff: None,
-            dst: Utf8PathBuf::from("CLAUDE.md"),
+            dst: Utf8PathBuf::from("AGENTS.md"),
         }
     }
 
     #[test]
     fn format_prompt_includes_dst_incoming_and_no_current_when_creating() {
-        let p = format_prompt(&req(None, "BODY\n", "merge for CLAUDE.md"));
-        assert!(p.contains("<kata:dst>CLAUDE.md</kata:dst>"));
+        let p = format_prompt(&req(None, "BODY\n", "merge for AGENTS.md"));
+        assert!(p.contains("<kata:dst>AGENTS.md</kata:dst>"));
         assert!(p.contains("<kata:incoming>\nBODY\n</kata:incoming>"));
         assert!(!p.contains("<kata:current>"));
         assert!(p.contains("<kata:body>"), "must instruct on response tag");
