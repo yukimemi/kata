@@ -1,7 +1,7 @@
-# renri.toml — pj-rust layer. Overwrites pj-base's apm-install
-# baseline with a richer post_create hook: cargo make on-add
-# refreshes apm skills *and* fetches the upstream remote, so the
+# renri.toml — fresh worktrees run `cargo make on-add`, which
+# refreshes apm skills *and* fetches the upstream remote so the
 # new worktree is rebase-ready without a second command.
+# Schema and examples: https://github.com/yukimemi/renri
 
 [[hooks.post_create]]
 type = "command"

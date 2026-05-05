@@ -5,8 +5,9 @@
 name: kata
 version: 0.0.0
 description: |
-  Dev-consumer APM config for the kata repo. Pinned to `#main` so
-  `apm install --update` always pulls the latest renri skill.
+  Dev-consumer APM config for the kata repo. Pinned
+  to `#main` so `apm install --update` always pulls the latest
+  renri skill.
 author: yukimemi
 dependencies:
   apm:

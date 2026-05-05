@@ -1,5 +1,5 @@
 preset = "github.com/yukimemi/pj-presets:rust-cli"
-applied_at = "2026-05-05T02:56:50.5931715Z"
+applied_at = "2026-05-05T08:42:36.6857753Z"
 
 [[templates]]
 source = "github.com/yukimemi/pj-base"
@@ -8,7 +8,7 @@ version = "0.2.0"
 
 [[templates]]
 source = "github.com/yukimemi/pj-rust"
-rev = "46022482fb91720de012465da5fae40a040d2b56"
+rev = "24012b25f20eced513d2e1e53b43d833b36afd17"
 version = "0.2.0"
 
 [[templates]]
@@ -30,19 +30,19 @@ content_hash = "733fc58cfdd43e5c91b522e71932bbd22c83b51700937fed382564bbe7262193
 content_hash = "e4f146a1c66d11e6b6c707f52507b3e37da2fe52d8d7cf13f75edcf9ad5d3a7f"
 
 [files."Makefile.toml"]
-content_hash = "68ad009b4cc10c774abcaec9197211b4ced66265a71f8ee2419f7a0f9f942ab5"
+content_hash = "5f3394eb981415aaa0b52e0cecfd67d9b68781ff951eaf416278561a62672243"
 
 [files."apm.yml"]
-content_hash = "1c64060401e239860acabe3838e783f022bb5f6b70883029ecec671f3ac930f5"
+content_hash = "033cd596abf27a1e04844d9c7327a97abbd7565fdaa59a44771ab6cc837f5af4"
 
 [files."clippy.toml"]
 content_hash = "89dbb3b4fd63c479f61f077d2383ab5c0998ea838f271ed57fd09281975deda0"
 
 [files."renovate.json"]
-content_hash = "ce5061dba1a3438dcc9ae691b6e74cb5e1d6a65ad2b1d6ae62d9a274c0259427"
+content_hash = "7a523c7cffd41452b2190e94fb585c4d0dd6b600f5b21f56cc6a4b0d5b0aba08"
 
 [files."renri.toml"]
-content_hash = "a28b99cbe3d7a8569c2dabcbc2e9301b47afa057b00976d9abcabc17dd892e7a"
+content_hash = "f4751570494ba62997cfb47e3abee2e707d3e01d924d1e8b940905a4e7c974f3"
 
 [files."rustfmt.toml"]
 content_hash = "8a0bd07a7aaaf3e9fed5dd297b04a5f96c4a969d895375aa4e00247a95aa616c"

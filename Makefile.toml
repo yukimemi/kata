@@ -98,7 +98,8 @@ script = '''
 # fails there with "not a git repository". Prefer `jj git fetch`, which
 # works in pure-jj and colocated repos. Fall back to `git fetch` for
 # pure-git (no `.jj/`) worktrees.
-if is_path_exists ".jj"
+jj_present = is_path_exists ".jj"
+if ${jj_present}
     exec jj git fetch
 else
     exec git fetch
