@@ -1,6 +1,6 @@
 # ROADMAP
 
-Implementation plan for `kata`. See [CLAUDE.md](./CLAUDE.md) for the
+Implementation plan for `kata`. See [AGENTS.md](./AGENTS.md) for the
 settled design decisions; this file is the *how* and *in what order*.
 
 ## Phase 1 — MVP "single PJ + overwrite + once/always"
@@ -127,7 +127,7 @@ kata/
 ├── Makefile.toml                   # check / fmt / clippy / test / setup
 ├── apm.yml                         # imports renri (worktree workflow)
 ├── apm.lock.yaml
-├── CLAUDE.md
+├── AGENTS.md
 ├── ROADMAP.md
 ├── README.md
 ├── LICENSE

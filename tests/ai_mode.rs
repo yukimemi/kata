@@ -48,13 +48,13 @@ fn make_ai_template(parent: &Path, name: &str) -> PathBuf {
 name = "ai-demo"
 
 [[file]]
-src = "CLAUDE.md"
+src = "AGENTS.md"
 how = "ai"
 when = "always"
-prompt = "Merge the freshly-rendered CLAUDE.md into the existing one."
+prompt = "Merge the freshly-rendered AGENTS.md into the existing one."
 "#,
     );
-    write(&root.join("CLAUDE.md"), "kata-managed CLAUDE.md\n");
+    write(&root.join("AGENTS.md"), "kata-managed AGENTS.md\n");
     root
 }
 
@@ -96,8 +96,8 @@ fn no_ai_flag_skips_ai_files_without_running_agent() {
 
     // The destination must NOT have been created — `--no-ai` skips.
     assert!(
-        !pj.join("CLAUDE.md").exists(),
-        "--no-ai must skip how=ai files (CLAUDE.md was created)",
+        !pj.join("AGENTS.md").exists(),
+        "--no-ai must skip how=ai files (AGENTS.md was created)",
     );
 }
 
@@ -111,7 +111,7 @@ fn ai_files_skip_without_yes_flag_even_when_agent_exists() {
     let pj = init_with_template(td.path(), &tmpl, &[]);
 
     assert!(
-        !pj.join("CLAUDE.md").exists(),
+        !pj.join("AGENTS.md").exists(),
         "non-interactive init without --yes must not write the AI dst",
     );
 }
@@ -154,7 +154,7 @@ source = "{}"
         .stderr(predicate::str::contains("no AI agent available"));
 
     assert!(
-        !pj.join("CLAUDE.md").exists(),
+        !pj.join("AGENTS.md").exists(),
         "no agent on PATH must skip the dst, not write a placeholder",
     );
 }

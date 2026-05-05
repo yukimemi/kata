@@ -2,7 +2,7 @@
 //! block inside an existing file. Useful for managing a small
 //! kata-owned section of a larger file the project also edits by
 //! hand: a `dependencies` block in `Cargo.toml`, a managed
-//! section in `.gitignore`, a tagged region in `CLAUDE.md`.
+//! section in `.gitignore`, a tagged region in `AGENTS.md`.
 //!
 //! Behaviour:
 //!
