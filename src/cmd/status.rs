@@ -3,6 +3,7 @@
 //! global registry (every PJ kata knows about).
 
 use camino::{Utf8Path, Utf8PathBuf};
+use owo_colors::OwoColorize;
 
 use crate::applied::AppliedState;
 use crate::config::{GlobalConfig, ProjectEntry};
@@ -17,11 +18,12 @@ pub async fn run(
     at: Option<Utf8PathBuf>,
     all: bool,
     tags: Vec<String>,
+    paths: bool,
     interactive: bool,
     no_color: bool,
 ) -> Result<()> {
     if all {
-        return run_all(tags, no_color);
+        return run_all(tags, paths, no_color);
     }
     run_single(at, interactive, no_color).await
 }
@@ -76,7 +78,7 @@ async fn run_single(at: Option<Utf8PathBuf>, interactive: bool, no_color: bool) 
     Ok(())
 }
 
-fn run_all(tags: Vec<String>, _no_color: bool) -> Result<()> {
+fn run_all(tags: Vec<String>, show_paths: bool, no_color: bool) -> Result<()> {
     let config = GlobalConfig::load()?;
     let projects = select_registered_projects(&config, &tags);
     if projects.is_empty() {
@@ -91,6 +93,7 @@ fn run_all(tags: Vec<String>, _no_color: bool) -> Result<()> {
     }
 
     let rows: Vec<DriftRow> = projects.iter().map(DriftRow::from_entry).collect();
+    let color = ui::color_enabled(no_color);
 
     let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
     let path_w = rows.iter().map(|r| r.path.len()).max().unwrap_or(4).max(4);
@@ -102,36 +105,92 @@ fn run_all(tags: Vec<String>, _no_color: bool) -> Result<()> {
         .unwrap_or(5)
         .max(5);
 
-    println!(
-        "{:<name_w$}  {:<path_w$}  {:<tracked_w$}  {:<drift_w$}  STATUS",
-        "NAME",
-        "PATH",
-        "TRACKED",
-        "DRIFT",
-        name_w = name_w,
-        path_w = path_w,
-        tracked_w = tracked_w,
-        drift_w = drift_w,
-    );
+    print_header(&[
+        ("NAME", name_w),
+        ("PATH", path_w),
+        ("TRACKED", tracked_w),
+        ("DRIFT", drift_w),
+        ("STATUS", 0),
+    ], show_paths, color);
 
     for r in &rows {
-        println!(
-            "{:<name_w$}  {:<path_w$}  {:<tracked_w$}  {:<drift_w$}  {}",
-            r.name,
-            r.path,
+        let mut cells = vec![format!("{:<name_w$}", r.name, name_w = name_w)];
+        if show_paths {
+            cells.push(if color {
+                format!("{:<path_w$}", r.path, path_w = path_w)
+                    .dimmed()
+                    .to_string()
+            } else {
+                format!("{:<path_w$}", r.path, path_w = path_w)
+            });
+        }
+        cells.push(format!(
+            "{:<tracked_w$}",
             r.tracked,
-            r.drift_summary,
-            r.status,
-            name_w = name_w,
-            path_w = path_w,
-            tracked_w = tracked_w,
-            drift_w = drift_w,
-        );
+            tracked_w = tracked_w
+        ));
+        cells.push(format_drift_summary(&r.drift_summary, drift_w, color));
+        cells.push(format_status(&r.status, color));
+        println!("{}", cells.join("  "));
+
         for line in &r.drift_detail {
-            println!("    {line}");
+            if color {
+                println!("    {}", line.yellow());
+            } else {
+                println!("    {line}");
+            }
         }
     }
     Ok(())
+}
+
+/// Print the bold-but-uncoloured table header, optionally
+/// dropping the PATH column.
+fn print_header(cells: &[(&str, usize)], show_paths: bool, color: bool) {
+    let mut parts = Vec::with_capacity(cells.len());
+    for (label, width) in cells {
+        if !show_paths && *label == "PATH" {
+            continue;
+        }
+        let cell = if *width == 0 {
+            (*label).to_string()
+        } else {
+            format!("{:<w$}", label, w = *width)
+        };
+        parts.push(if color {
+            cell.bold().to_string()
+        } else {
+            cell
+        });
+    }
+    println!("{}", parts.join("  "));
+}
+
+fn format_status(s: &str, color: bool) -> String {
+    if !color {
+        return s.to_string();
+    }
+    match s {
+        "ok" => s.green().to_string(),
+        "drift" => s.yellow().bold().to_string(),
+        "not init'd" => s.cyan().to_string(),
+        s if s.starts_with("error") || s == "missing dir" => s.red().bold().to_string(),
+        _ => s.to_string(),
+    }
+}
+
+fn format_drift_summary(s: &str, width: usize, color: bool) -> String {
+    let padded = format!("{:<w$}", s, w = width);
+    if !color {
+        return padded;
+    }
+    if s == "clean" {
+        padded.green().to_string()
+    } else if s.contains("drifted") {
+        padded.yellow().to_string()
+    } else {
+        padded
+    }
 }
 
 struct DriftRow {

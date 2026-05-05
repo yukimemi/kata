@@ -3,27 +3,34 @@
 //! overview instead.
 
 use camino::Utf8PathBuf;
+use owo_colors::OwoColorize;
 
 use crate::applied::AppliedState;
 use crate::config::GlobalConfig;
 use crate::error::{Error, Result};
+use crate::ui;
 
 use super::resolve_pj_root;
 
-pub fn run(at: Option<Utf8PathBuf>, all: bool, no_color: bool) -> Result<()> {
+pub fn run(at: Option<Utf8PathBuf>, all: bool, paths: bool, no_color: bool) -> Result<()> {
     if all {
-        return run_all(no_color);
+        return run_all(paths, no_color);
     }
     run_single(at, no_color)
 }
 
-fn run_single(at: Option<Utf8PathBuf>, _no_color: bool) -> Result<()> {
+fn run_single(at: Option<Utf8PathBuf>, no_color: bool) -> Result<()> {
+    let explicit_at = at.is_some();
     let cwd = resolve_pj_root(at)?;
-    let pj_root = crate::paths::find_pj_root(&cwd).ok_or_else(|| {
-        Error::Config(format!(
-            "no .kata/applied.toml found at or above {cwd}; run `kata init` first"
-        ))
-    })?;
+    let pj_root = match crate::paths::find_pj_root(&cwd) {
+        Some(p) => p,
+        None if explicit_at => {
+            return Err(Error::Config(format!(
+                "no .kata/applied.toml found at or above {cwd}; run `kata init` first"
+            )));
+        }
+        None => return run_single_pick_from_registry(no_color),
+    };
     let applied = AppliedState::load(&pj_root)?;
 
     println!("project: {pj_root}");
@@ -50,7 +57,7 @@ fn run_single(at: Option<Utf8PathBuf>, _no_color: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_all(_no_color: bool) -> Result<()> {
+fn run_all(show_paths: bool, no_color: bool) -> Result<()> {
     let config = GlobalConfig::load()?;
     if config.projects.is_empty() {
         println!(
@@ -64,6 +71,7 @@ fn run_all(_no_color: bool) -> Result<()> {
         .iter()
         .map(RegistryRow::from_entry)
         .collect();
+    let color = ui::color_enabled(no_color);
 
     let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
     let path_w = rows.iter().map(|r| r.path.len()).max().unwrap_or(4).max(4);
@@ -81,36 +89,120 @@ fn run_all(_no_color: bool) -> Result<()> {
         .unwrap_or(7)
         .max(7);
 
-    println!(
-        "{:<name_w$}  {:<path_w$}  {:<preset_w$}  {:<templates_w$}  {:<applied_w$}  STATUS",
-        "NAME",
-        "PATH",
-        "PRESET",
-        "TEMPLATES",
-        "APPLIED",
-        name_w = name_w,
-        path_w = path_w,
-        preset_w = preset_w,
-        templates_w = templates_w,
-        applied_w = applied_w,
+    print_header(
+        &[
+            ("NAME", name_w),
+            ("PATH", path_w),
+            ("PRESET", preset_w),
+            ("TEMPLATES", templates_w),
+            ("APPLIED", applied_w),
+            ("STATUS", 0),
+        ],
+        show_paths,
+        color,
     );
     for r in &rows {
-        println!(
-            "{:<name_w$}  {:<path_w$}  {:<preset_w$}  {:<templates_w$}  {:<applied_w$}  {}",
-            r.name,
-            r.path,
-            r.preset,
+        let mut cells = vec![format!("{:<name_w$}", r.name, name_w = name_w)];
+        if show_paths {
+            cells.push(if color {
+                format!("{:<path_w$}", r.path, path_w = path_w)
+                    .dimmed()
+                    .to_string()
+            } else {
+                format!("{:<path_w$}", r.path, path_w = path_w)
+            });
+        }
+        cells.push(if color {
+            format!("{:<preset_w$}", r.preset, preset_w = preset_w)
+                .dimmed()
+                .to_string()
+        } else {
+            format!("{:<preset_w$}", r.preset, preset_w = preset_w)
+        });
+        cells.push(format!(
+            "{:<templates_w$}",
             r.templates,
-            r.applied_at,
-            r.status,
-            name_w = name_w,
-            path_w = path_w,
-            preset_w = preset_w,
-            templates_w = templates_w,
-            applied_w = applied_w,
-        );
+            templates_w = templates_w
+        ));
+        cells.push(if color {
+            format!("{:<applied_w$}", r.applied_at, applied_w = applied_w)
+                .dimmed()
+                .to_string()
+        } else {
+            format!("{:<applied_w$}", r.applied_at, applied_w = applied_w)
+        });
+        cells.push(format_status(&r.status, color));
+        println!("{}", cells.join("  "));
     }
     Ok(())
+}
+
+fn print_header(cells: &[(&str, usize)], show_paths: bool, color: bool) {
+    let mut parts = Vec::with_capacity(cells.len());
+    for (label, width) in cells {
+        if !show_paths && *label == "PATH" {
+            continue;
+        }
+        let cell = if *width == 0 {
+            (*label).to_string()
+        } else {
+            format!("{:<w$}", label, w = *width)
+        };
+        parts.push(if color {
+            cell.bold().to_string()
+        } else {
+            cell
+        });
+    }
+    println!("{}", parts.join("  "));
+}
+
+fn format_status(s: &str, color: bool) -> String {
+    if !color {
+        return s.to_string();
+    }
+    match s {
+        "ok" => s.green().to_string(),
+        "not init'd" => s.cyan().to_string(),
+        s if s.starts_with("error") || s == "missing dir" => s.red().bold().to_string(),
+        _ => s.to_string(),
+    }
+}
+
+/// Fallback when `kata list` (no `--at`, no `--all`) is run from
+/// a directory with no `.kata/applied.toml` in its hierarchy: pull
+/// the global registry and offer an `inquire` select instead of
+/// erroring. Matches `renri list`'s pattern.
+fn run_single_pick_from_registry(no_color: bool) -> Result<()> {
+    let config = GlobalConfig::load()?;
+    if config.projects.is_empty() {
+        return Err(Error::Config(
+            "no .kata/applied.toml in the current directory's hierarchy and no projects in the global registry — \
+             cd into a kata-managed PJ, or run `kata init` first."
+                .into(),
+        ));
+    }
+    // Disambiguate by path so two PJs with the same `name` don't
+    // collapse into one menu entry.
+    let labels: Vec<String> = config
+        .projects
+        .iter()
+        .map(|p| format!("{}  ({})", p.name, p.path))
+        .collect();
+    let chosen = inquire::Select::new("pick a project to inspect:", labels.clone())
+        .with_help_message("\u{2191}\u{2193} to move, Enter to confirm, Esc to cancel")
+        .prompt()
+        .map_err(|e| match e {
+            inquire::InquireError::OperationCanceled
+            | inquire::InquireError::OperationInterrupted => Error::Config("cancelled".into()),
+            other => Error::Config(format!("prompt failed: {other}")),
+        })?;
+    let idx = labels
+        .iter()
+        .position(|l| l == &chosen)
+        .expect("chosen label must come from labels");
+    let selected = config.projects[idx].path.clone();
+    run_single(Some(selected), no_color)
 }
 
 struct RegistryRow {
