@@ -86,3 +86,25 @@ exec apm install --update -t copilot,claude,gemini
 [tasks.setup]
 description = "One-time setup for new contributors: pre-push hook + APM install"
 dependencies = ["hook-install", "apm-install"]
+
+[tasks.vcs-fetch]
+description = "Fetch latest refs (jj when in a jj workspace, otherwise git)"
+# Best-effort: a missing `jj` / `git` binary, an unreachable remote, etc.
+# should log but not fail `cargo make on-add` and break `renri add`.
+ignore_errors = true
+script_runner = "@duckscript"
+script = '''
+# A non-colocated jj workspace has `.jj/` but no `.git/`, and `git fetch`
+# fails there with "not a git repository". Prefer `jj git fetch`, which
+# works in pure-jj and colocated repos. Fall back to `git fetch` for
+# pure-git (no `.jj/`) worktrees.
+if is_path_exists .jj
+    exec jj git fetch
+else
+    exec git fetch
+end
+'''
+
+[tasks.on-add]
+description = "Wired to renri's [[hooks.post_create]] — runs in a freshly created worktree"
+dependencies = ["apm-install-update", "vcs-fetch"]

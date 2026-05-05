@@ -1,17 +1,12 @@
-# Required-by-APM but intentionally static. Per AGENTS.md "Version
-# lives only in Cargo.toml"; this apm.yml is consumer-side and not
-# a publishable APM package, so the version below is a placeholder
-# that should never bump.
+# Required-by-APM but intentionally static. yukimemi/* projects
+# are not APM publishers; this apm.yml exists only to install
+# agent skills that contributors want available while working on
+# this repo — currently the `renri` worktree skill.
 name: kata
 version: 0.0.0
 description: |
-  Dev-consumer APM config for the kata repo. kata itself is a Rust
-  CLI; this apm.yml only exists to install agent skills that
-  contributors want available while working on kata — currently
-  the `renri` skill so AI sessions can manage worktrees / jj
-  workspaces while developing.
-  (kata as an APM publisher — shipping its own kata skill — is a
-  separate Phase 4 milestone.)
+  Dev-consumer APM config for the kata repo. Pinned to `#main` so
+  `apm install --update` always pulls the latest renri skill.
 author: yukimemi
 dependencies:
   apm:
