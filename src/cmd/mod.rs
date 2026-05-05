@@ -6,8 +6,10 @@ pub mod apply;
 pub mod doctor;
 pub mod init;
 pub mod list;
+pub mod register;
 pub mod remove;
 pub mod status;
+pub mod unregister;
 pub mod update;
 
 use std::collections::BTreeMap;

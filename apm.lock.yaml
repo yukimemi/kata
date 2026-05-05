@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-05-05T04:34:13.312641+00:00'
+generated_at: '2026-05-05T04:40:28.870604+00:00'
 apm_version: 0.12.1
 dependencies:
 - repo_url: yukimemi/renri

@@ -240,11 +240,39 @@ pub enum Command {
         at: Option<Utf8PathBuf>,
     },
 
-    /// List inventory (registered projects / template files in this
-    /// PJ).
+    /// List inventory. Without `--all`, prints what governs the
+    /// current PJ. With `--all`, walks the global registry and
+    /// shows a one-row-per-PJ overview (preset / templates /
+    /// last-applied / status).
     List {
         #[arg(long, value_name = "DIR")]
         at: Option<Utf8PathBuf>,
+        /// Show every PJ from the global registry instead of only
+        /// the current one.
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Add a project to the global registry
+    /// (`~/.config/kata/config.toml`). Optional `--name` defaults
+    /// to the upstream repo basename; `--tags` are repeatable
+    /// labels for filtering with `kata apply --all --tag <t>`
+    /// (Phase 5-b).
+    Register {
+        #[arg(value_name = "PATH")]
+        path: Option<Utf8PathBuf>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+    },
+
+    /// Drop a project from the global registry. The PJ's
+    /// `.kata/applied.toml` is left alone — only the registry
+    /// pointer goes away.
+    Unregister {
+        /// Project name (from registry) or absolute path.
+        key: String,
     },
 
     /// Diagnose environment (git, agent CLIs, config dirs).
@@ -360,7 +388,11 @@ impl Cli {
             Command::Update { templates, rev, at } => {
                 cmd::update::run(templates, rev, at, no_color).await
             }
-            Command::List { at } => cmd::list::run(at, no_color),
+            Command::List { at, all } => cmd::list::run(at, all, no_color),
+            Command::Register { path, name, tags } => {
+                cmd::register::run(path, name, tags, no_color).await
+            }
+            Command::Unregister { key } => cmd::unregister::run(key, no_color),
             Command::Doctor => cmd::doctor::run(no_color),
             Command::Completion { shell } => {
                 let mut c = Cli::command();
