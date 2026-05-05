@@ -91,10 +91,10 @@ impl ApplyMode for Ai {
         // prompt the same way the chat loop would have for turn 1
         // (run-wide --ai-prompt + per-file prompt) so the agent has
         // the same starting context — only kata's chat orchestration
-        // is dropped, not the framing.
+        // is dropped, not the framing. The chat-side `agent` clone
+        // above goes unused on this branch; that's fine, the
+        // compiler/clippy treat its other branch usage as enough.
         if matches!(resolved_mode, AiMode::Handoff) {
-            let _ = agent; // not used in handoff; keep the binding visible to prove the agent
-            // backend was resolvable.
             let Some(backend) = ctx.agent_backend else {
                 return Ok(skipped(
                     Decision::Defer,
