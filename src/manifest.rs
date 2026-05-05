@@ -74,6 +74,14 @@ pub struct FileSpec {
     /// AI prompt (Tera-templated). Required for `how = "ai"`.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Per-file AI mode for `how = "ai"`. Defaults to `chat`
+    /// (kata-driven chat loop with the chezmoi-style dialog). Set
+    /// to `handoff` when a file is best edited by the user inside
+    /// the agent CLI itself — kata will skip the chat loop and
+    /// spawn the agent interactively, never re-importing the
+    /// result. Run-wide `--ai-mode handoff` overrides this.
+    #[serde(default, rename = "ai_mode")]
+    pub ai_mode: Option<AiMode>,
     /// Marker pair for `merge-section`.
     #[serde(default)]
     pub marker: Option<MarkerSpec>,
@@ -113,6 +121,19 @@ pub enum AgentKind {
     Claude,
     Gemini,
     Codex,
+}
+
+/// Per-file (or run-wide) AI mode selector for `how = "ai"`.
+/// `Chat` runs kata's chezmoi-style dialog (the default); `Handoff`
+/// short-circuits the dialog and spawns the agent CLI directly so
+/// the user can drive it interactively without kata re-importing
+/// the result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiMode {
+    #[default]
+    Chat,
+    Handoff,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -230,6 +251,60 @@ mod tests {
         assert_eq!(m.files[0].dst_or_src(), "Makefile.toml");
     }
 
+    #[test]
+    fn ai_mode_defaults_to_none_when_omitted() {
+        let raw = r#"
+            name = "demo"
+            [[file]]
+            src = "CLAUDE.md"
+            how = "ai"
+            prompt = "merge"
+        "#;
+        let m = Manifest::from_str(raw, &PathBuf::from("test.toml")).unwrap();
+        assert_eq!(m.files[0].ai_mode, None);
+    }
+
+    #[test]
+    fn ai_mode_parses_handoff_and_chat() {
+        let raw = r#"
+            name = "demo"
+            [[file]]
+            src = "CLAUDE.md"
+            how = "ai"
+            prompt = "merge"
+            ai_mode = "handoff"
+
+            [[file]]
+            src = "ROADMAP.md"
+            how = "ai"
+            prompt = "merge"
+            ai_mode = "chat"
+        "#;
+        let m = Manifest::from_str(raw, &PathBuf::from("test.toml")).unwrap();
+        assert_eq!(m.files[0].ai_mode, Some(AiMode::Handoff));
+        assert_eq!(m.files[1].ai_mode, Some(AiMode::Chat));
+    }
+
+    #[test]
+    fn ai_mode_rejects_unknown_variant() {
+        let raw = r#"
+            name = "demo"
+            [[file]]
+            src = "x"
+            how = "ai"
+            prompt = "merge"
+            ai_mode = "bogus"
+        "#;
+        let err = Manifest::from_str(raw, &PathBuf::from("test.toml")).unwrap_err();
+        // Don't lock in the exact message — just confirm it surfaces
+        // the bad variant.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ai_mode") || msg.contains("bogus") || msg.contains("variant"),
+            "expected an error referencing the bad value, got: {msg}",
+        );
+    }
+
     fn spec(src: &str, dst: Option<&str>) -> FileSpec {
         FileSpec {
             src: src.into(),
@@ -239,6 +314,7 @@ mod tests {
             when_expr: None,
             agent: None,
             prompt: None,
+            ai_mode: None,
             marker: None,
             paths: vec![],
             run: None,

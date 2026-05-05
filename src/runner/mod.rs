@@ -16,7 +16,7 @@ use crate::ai::{AiAgent, Backend};
 use crate::applied::{AppliedState, AppliedTemplate};
 use crate::config::ProjectEntry;
 use crate::error::{Error, Result};
-use crate::manifest::{FileSpec, VarSpec, WhenMode};
+use crate::manifest::{AiMode, FileSpec, VarSpec, WhenMode};
 use crate::modes::{ActionContext, OutcomeKind, for_how};
 use crate::preset::TemplateRef;
 use crate::render::{Renderer, VarResolver, VarSources, build_context};
@@ -46,6 +46,12 @@ pub struct PjApplyOptions {
     /// `ActionContext` so `[h]andoff` can spawn the CLI directly
     /// rather than going through the `AiAgent` trait.
     pub agent_backend: Option<Backend>,
+    /// `--ai-mode <chat|handoff>`: run-wide override for the
+    /// per-file `ai_mode`. `Some(Handoff)` forces every `how = "ai"`
+    /// file to skip the chat loop and spawn the agent CLI
+    /// interactively. `None` honours each manifest's `ai_mode`
+    /// (default `Chat`).
+    pub ai_mode_override: Option<AiMode>,
 }
 
 #[derive(Debug)]
@@ -196,6 +202,7 @@ pub async fn apply_to_pj(
                 interactive: opts.interactive,
                 yes_all: opts.yes_all,
                 ai_prompt: opts.ai_prompt.as_deref(),
+                ai_mode_override: opts.ai_mode_override,
             };
 
             let outcome = match mode.execute(&action_ctx, opts.dry_run).await {
@@ -384,6 +391,7 @@ pub async fn plan_pj(
                 interactive,
                 yes_all: false,
                 ai_prompt: None,
+                ai_mode_override: None,
             };
             let plan = mode.plan(&action_ctx).await?;
             out.push((dst_rel, plan.kind, plan.diff));

@@ -30,6 +30,7 @@ use crate::ai::{AiRequest, DEFAULT_SYSTEM_PROMPT, run_handoff};
 use crate::applied::Decision;
 use crate::error::{Error, Result};
 use crate::interactive::{AiDecision, prompt_ai_decision};
+use crate::manifest::AiMode;
 
 use super::{
     ActionContext, ActionOutcome, ActionPlan, ApplyMode, OutcomeKind, PlanKind, unified_diff,
@@ -77,6 +78,34 @@ impl ApplyMode for Ai {
             eprintln!("  ai skip {}: {HINT}", ctx.dst_abs);
             return Ok(skipped(Decision::Defer, Some(HINT.into())));
         };
+
+        // Resolve the per-file AI mode. CLI override wins; otherwise
+        // honour what the manifest declared (default `Chat`).
+        let resolved_mode = ctx
+            .ai_mode_override
+            .or(ctx.spec.ai_mode)
+            .unwrap_or_default();
+
+        // Manifest-elected handoff: skip the chat loop entirely and
+        // hand the user straight to the agent CLI. We assemble the
+        // prompt the same way the chat loop would have for turn 1
+        // (run-wide --ai-prompt + per-file prompt) so the agent has
+        // the same starting context — only kata's chat orchestration
+        // is dropped, not the framing. The chat-side `agent` clone
+        // above goes unused on this branch; that's fine, the
+        // compiler/clippy treat its other branch usage as enough.
+        if matches!(resolved_mode, AiMode::Handoff) {
+            let Some(backend) = ctx.agent_backend else {
+                return Ok(skipped(
+                    Decision::Defer,
+                    Some("handoff requested but no resolved AI backend was available".into()),
+                ));
+            };
+            let user_prompt = compose_user_prompt(ctx.ai_prompt, ctx.spec.prompt.as_deref());
+            let handoff_prompt = build_handoff_prompt_initial(&user_prompt, ctx);
+            run_handoff(backend, &handoff_prompt, ctx.dst_abs.as_std_path()).await?;
+            return Ok(skipped(Decision::Defer, None));
+        }
 
         // Initial chat-turn payload. We re-build this every iteration
         // when the user picks `[c]hat` so the agent sees its **most
@@ -343,6 +372,25 @@ fn edit_in_editor(dst_label: &str, body: &str) -> Result<String> {
         .map_err(|e| Error::Other(anyhow::Error::from(e).context("reading edited tmp file")))?;
     // tmp file dropped here; tempfile cleans up.
     Ok(edited)
+}
+
+/// Initial-handoff variant of `build_handoff_prompt`. Used when
+/// the file's `ai_mode = "handoff"` (or `--ai-mode handoff`) is
+/// in effect, so kata never ran a chat turn and there's no AI
+/// proposal yet — only the rendered template body to hand over.
+fn build_handoff_prompt_initial(user_prompt: &str, ctx: &ActionContext<'_>) -> String {
+    let current = ctx.current_body.as_deref().unwrap_or("");
+    format!(
+        "{user_prompt}\n\n\
+         [destination]\n{dst}\n\n\
+         [current contents on disk]\n{current}\n\n\
+         [freshly-rendered template body]\n{incoming}\n\n\
+         The user has chosen handoff: kata will not re-import your output. \
+         Use your own Edit / Write tools to merge the rendered template into \
+         the destination directly.",
+        dst = ctx.dst_abs,
+        incoming = ctx.rendered_body,
+    )
 }
 
 /// Build the prompt kata writes to the handoff tmp file. Stacks
