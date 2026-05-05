@@ -137,8 +137,8 @@ fn run_all(tags: Vec<String>, _no_color: bool) -> Result<()> {
 struct DriftRow {
     name: String,
     path: String,
-    /// `<n>` — count of files kata is currently tracking via
-    /// `applied.toml.files`.
+    /// `<n>` — count of files with a recorded `content_hash` that
+    /// kata can compare against on-disk bytes (drift-checkable).
     tracked: String,
     /// Either `clean` or `<n> drifted` for the column.
     drift_summary: String,
@@ -228,8 +228,11 @@ fn check_drift(pj_root: &Utf8Path, applied: &AppliedState) -> (usize, Vec<String
                     ));
                 }
             }
-            Err(_) => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 drift.push(format!("{dst_rel}  (missing — file deleted since apply)"));
+            }
+            Err(e) => {
+                drift.push(format!("{dst_rel}  (unreadable — {e})"));
             }
         }
     }
