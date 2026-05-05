@@ -67,12 +67,17 @@ pub async fn fetch(dir: &Utf8Path) -> Result<()> {
 /// Branch-name resolution: kata's template cache slots are cloned
 /// in detached-HEAD state and **never create local branches**, so
 /// a literal `git checkout main` fails with "no such ref" the
-/// moment the user asks `kata update --rev main`. To make the
-/// common-case branch lookup just work, we first try
-/// `git checkout origin/<rev>` and only fall back to the literal
-/// `git checkout <rev>` for revs that are SHAs / tags / `HEAD` /
-/// already qualified refs (anything containing `/` is treated as
-/// already qualified to avoid `origin/origin/main`).
+/// moment the user asks `kata update --rev main`. To handle that
+/// while still supporting branches whose names contain `/`
+/// (`feature/foo`, `release/v1`), the strategy is:
+///
+/// 1. Try the literal `git checkout <rev>` first. SHAs, tags,
+///    `HEAD`, already-qualified refs, and locally-tracked
+///    branches all succeed here.
+/// 2. If that fails AND the rev isn't already fully qualified
+///    (i.e. doesn't start with `origin/` or `refs/`, isn't
+///    `HEAD`), retry against `git checkout origin/<rev>`. This
+///    rescues plain branch names whether or not they contain `/`.
 pub async fn checkout(dir: &Utf8Path, rev: &str) -> Result<()> {
     if rev.starts_with('-') {
         return Err(Error::Git(format!(
@@ -80,15 +85,25 @@ pub async fn checkout(dir: &Utf8Path, rev: &str) -> Result<()> {
         )));
     }
 
-    let plain_branch_name = !rev.contains('/') && rev != "HEAD";
-    if plain_branch_name {
-        let upstream = format!("origin/{rev}");
-        if try_checkout(dir, &upstream).await.is_ok() {
-            return Ok(());
-        }
+    let literal_err = match try_checkout(dir, rev).await {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+
+    // Already fully qualified? Surface the original error rather
+    // than constructing an `origin/origin/...` chain.
+    if rev == "HEAD" || rev.starts_with("origin/") || rev.starts_with("refs/") {
+        return Err(literal_err);
     }
 
-    try_checkout(dir, rev).await
+    let upstream = format!("origin/{rev}");
+    match try_checkout(dir, &upstream).await {
+        Ok(()) => Ok(()),
+        // The upstream retry failed too. The literal error is the
+        // more informative one to surface — it's what the user
+        // actually asked for.
+        Err(_) => Err(literal_err),
+    }
 }
 
 async fn try_checkout(dir: &Utf8Path, rev: &str) -> Result<()> {
