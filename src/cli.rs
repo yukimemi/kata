@@ -169,6 +169,21 @@ pub enum Command {
         /// `defaults.ai_concurrency` (default 4) for this run.
         #[arg(long = "ai-concurrency", value_name = "N")]
         ai_concurrency: Option<usize>,
+        /// Walk every project in the global registry instead of
+        /// the current PJ. Conflicts with `--at`. Combine with
+        /// `--tag` to scope the fan-out.
+        #[arg(long, conflicts_with = "at")]
+        all: bool,
+        /// Filter `--all` by tag (repeatable; intersection — all
+        /// requested tags must be present on a PJ for it to match).
+        /// Ignored without `--all`.
+        #[arg(long = "tag", value_name = "TAG", requires = "all")]
+        tags: Vec<String>,
+        /// Maximum concurrent PJ fan-outs under `--all`. Overrides
+        /// `defaults.pj_concurrency` (default 4) for this run.
+        /// Ignored without `--all`.
+        #[arg(long = "pj-concurrency", value_name = "N", requires = "all")]
+        pj_concurrency: Option<usize>,
     },
 
     /// Show what would change if `apply` were to run.
@@ -231,6 +246,8 @@ pub enum Command {
     /// recorded revs in `applied.toml`. No-op for local templates.
     Update {
         /// Templates to update (name or full source). Empty = all.
+        /// Ignored under `--all`, which always updates every
+        /// template each registered PJ has applied.
         templates: Vec<String>,
         /// Override the rev to check out (default = HEAD of
         /// upstream's default branch).
@@ -238,6 +255,19 @@ pub enum Command {
         rev: Option<String>,
         #[arg(long, value_name = "DIR")]
         at: Option<Utf8PathBuf>,
+        /// Walk every project in the global registry instead of
+        /// the current PJ. Conflicts with `--at`.
+        #[arg(long, conflicts_with = "at")]
+        all: bool,
+        /// Filter `--all` by tag (repeatable; intersection).
+        /// Ignored without `--all`.
+        #[arg(long = "tag", value_name = "TAG", requires = "all")]
+        tags: Vec<String>,
+        /// Maximum concurrent PJ fan-outs under `--all`. Overrides
+        /// `defaults.pj_concurrency` (default 4) for this run.
+        /// Ignored without `--all`.
+        #[arg(long = "pj-concurrency", value_name = "N", requires = "all")]
+        pj_concurrency: Option<usize>,
     },
 
     /// List inventory. Without `--all`, prints what governs the
@@ -337,22 +367,43 @@ impl Cli {
                 ai_prompt,
                 ai_mode,
                 ai_concurrency,
+                all,
+                tags,
+                pj_concurrency,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
-                cmd::apply::run(
-                    at,
-                    dry_run,
-                    vars,
-                    kind,
-                    no_ai,
-                    yes,
-                    ai_prompt,
-                    ai_mode.map(Into::into),
-                    ai_concurrency,
-                    interactive,
-                    no_color,
-                )
-                .await
+                if all {
+                    cmd::apply::run_all(
+                        tags,
+                        dry_run,
+                        vars,
+                        kind,
+                        no_ai,
+                        yes,
+                        ai_prompt,
+                        ai_mode.map(Into::into),
+                        ai_concurrency,
+                        pj_concurrency,
+                        interactive,
+                        no_color,
+                    )
+                    .await
+                } else {
+                    cmd::apply::run(
+                        at,
+                        dry_run,
+                        vars,
+                        kind,
+                        no_ai,
+                        yes,
+                        ai_prompt,
+                        ai_mode.map(Into::into),
+                        ai_concurrency,
+                        interactive,
+                        no_color,
+                    )
+                    .await
+                }
             }
             Command::Status { at } => cmd::status::run(at, interactive, no_color).await,
             Command::Add {
@@ -385,8 +436,19 @@ impl Cli {
                 .await
             }
             Command::Remove { template, at } => cmd::remove::run(template, at, no_color).await,
-            Command::Update { templates, rev, at } => {
-                cmd::update::run(templates, rev, at, no_color).await
+            Command::Update {
+                templates,
+                rev,
+                at,
+                all,
+                tags,
+                pj_concurrency,
+            } => {
+                if all {
+                    cmd::update::run_all(tags, rev, pj_concurrency, no_color).await
+                } else {
+                    cmd::update::run(templates, rev, at, no_color).await
+                }
             }
             Command::List { at, all } => cmd::list::run(at, all, no_color),
             Command::Register { path, name, tags } => {

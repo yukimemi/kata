@@ -94,6 +94,44 @@ pub(crate) async fn resolve_project_name(pj_root: &Utf8Path) -> String {
     pj_root.file_name().unwrap_or("kata-project").to_string()
 }
 
+/// Hard-coded floor for `defaults.pj_concurrency`. Used when the
+/// global config doesn't specify one and the CLI doesn't override.
+const DEFAULT_PJ_CONCURRENCY: usize = 4;
+
+/// Resolve the per-PJ concurrency cap for multi-PJ fan-out
+/// (`apply --all` / `update --all`). Same precedence chain as
+/// `resolve_ai_concurrency`: CLI override → global config →
+/// hard-coded floor.
+pub(crate) fn resolve_pj_concurrency(cli_override: Option<usize>) -> usize {
+    cli_override.unwrap_or_else(|| {
+        crate::config::GlobalConfig::load()
+            .ok()
+            .and_then(|c| c.defaults.pj_concurrency)
+            .unwrap_or(DEFAULT_PJ_CONCURRENCY)
+    })
+}
+
+/// Pick the registered PJs that should be visited by
+/// `apply --all` / `update --all`. With no `tag_filter`, every
+/// registered PJ is returned. With tags, a PJ is included iff its
+/// `tags` set contains *all* of the requested tags (intersection;
+/// `--tag rust --tag cli` matches PJs that are both rust and cli).
+pub(crate) fn select_registered_projects(
+    config: &crate::config::GlobalConfig,
+    tag_filter: &[String],
+) -> Vec<crate::config::ProjectEntry> {
+    config
+        .projects
+        .iter()
+        .filter(|p| {
+            tag_filter
+                .iter()
+                .all(|wanted| p.tags.iter().any(|t| t == wanted))
+        })
+        .cloned()
+        .collect()
+}
+
 pub mod doctor_helpers {
     use std::process::Command;
 
