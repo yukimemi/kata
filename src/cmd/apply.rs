@@ -14,7 +14,7 @@ use crate::preset::TemplateRef;
 use crate::runner::{PjApplyOptions, apply_to_pj};
 use crate::ui;
 
-use super::{parse_cli_vars, resolve_ai_concurrency, resolve_pj_root};
+use super::{parse_cli_vars, resolve_ai_concurrency, resolve_pj_root, resolve_project_name};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -58,7 +58,7 @@ pub async fn run(
         .collect();
 
     let project = ProjectEntry {
-        name: pj_root.file_name().unwrap_or("kata-project").to_string(),
+        name: resolve_project_name(&pj_root).await,
         path: pj_root.clone(),
         tags: vec![],
         overrides: None,

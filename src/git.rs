@@ -63,12 +63,35 @@ pub async fn fetch(dir: &Utf8Path) -> Result<()> {
 /// (right), so `git checkout -- <rev>` would try to interpret
 /// `<rev>` as a file path and fail. Defence in depth instead:
 /// refuse revs that look like CLI options up front.
+///
+/// Branch-name resolution: kata's template cache slots are cloned
+/// in detached-HEAD state and **never create local branches**, so
+/// a literal `git checkout main` fails with "no such ref" the
+/// moment the user asks `kata update --rev main`. To make the
+/// common-case branch lookup just work, we first try
+/// `git checkout origin/<rev>` and only fall back to the literal
+/// `git checkout <rev>` for revs that are SHAs / tags / `HEAD` /
+/// already qualified refs (anything containing `/` is treated as
+/// already qualified to avoid `origin/origin/main`).
 pub async fn checkout(dir: &Utf8Path, rev: &str) -> Result<()> {
     if rev.starts_with('-') {
         return Err(Error::Git(format!(
             "rev `{rev}` starts with '-' (looks like a CLI option); refusing to pass to git checkout"
         )));
     }
+
+    let plain_branch_name = !rev.contains('/') && rev != "HEAD";
+    if plain_branch_name {
+        let upstream = format!("origin/{rev}");
+        if try_checkout(dir, &upstream).await.is_ok() {
+            return Ok(());
+        }
+    }
+
+    try_checkout(dir, rev).await
+}
+
+async fn try_checkout(dir: &Utf8Path, rev: &str) -> Result<()> {
     let output = Command::new("git")
         .current_dir(dir.as_std_path())
         .arg("-c")
@@ -111,6 +134,56 @@ pub async fn current_head(dir: &Utf8Path) -> Result<String> {
     rev_parse(dir, "HEAD").await
 }
 
+/// Derive the upstream repo basename from `git config --get
+/// remote.origin.url` for the project at `dir`. Used by the cmd
+/// layer to set `project.name` so it's stable across worktrees
+/// instead of being the worktree directory's leaf — running
+/// `kata apply` from `~/wt/<repo>/<branch>/` should still report
+/// `project.name = <repo>`, not `<branch>`.
+///
+/// Returns `None` when the directory isn't a git repo, has no
+/// `remote.origin`, or the URL doesn't end with a parseable
+/// segment. Callers fall back to the directory leaf in that case.
+pub async fn repo_name_from_remote(dir: &Utf8Path) -> Option<String> {
+    let output = Command::new("git")
+        .current_dir(dir.as_std_path())
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8(output.stdout).ok()?;
+    parse_repo_basename(url.trim())
+}
+
+/// Pull the trailing repo segment out of a git remote URL. Handles
+/// the four common shapes:
+///
+/// - `https://github.com/owner/repo.git`
+/// - `https://github.com/owner/repo`
+/// - `git@github.com:owner/repo.git`
+/// - `git@github.com:owner/repo`
+///
+/// Returns `None` for empty / `/` / `:` only inputs.
+fn parse_repo_basename(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    // SSH URLs put the path after `:`; HTTPS / file URLs use `/`.
+    // Splitting on either is enough because the trailing segment
+    // has no `:` or `/` either way.
+    let last = url.rsplit(['/', ':']).next()?;
+    let trimmed = last.trim_end_matches(".git").trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// True if `git` is on PATH and runnable. Used by `kata doctor`.
 pub async fn is_available() -> bool {
     Command::new("git")
@@ -121,4 +194,49 @@ pub async fn is_available() -> bool {
         .await
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_repo_basename;
+
+    #[test]
+    fn parse_repo_basename_handles_https_with_dot_git() {
+        assert_eq!(
+            parse_repo_basename("https://github.com/yukimemi/kata.git").as_deref(),
+            Some("kata"),
+        );
+    }
+
+    #[test]
+    fn parse_repo_basename_handles_https_without_dot_git() {
+        assert_eq!(
+            parse_repo_basename("https://github.com/yukimemi/kata").as_deref(),
+            Some("kata"),
+        );
+    }
+
+    #[test]
+    fn parse_repo_basename_handles_ssh_with_dot_git() {
+        assert_eq!(
+            parse_repo_basename("git@github.com:yukimemi/kata.git").as_deref(),
+            Some("kata"),
+        );
+    }
+
+    #[test]
+    fn parse_repo_basename_handles_ssh_without_dot_git() {
+        assert_eq!(
+            parse_repo_basename("git@github.com:yukimemi/kata").as_deref(),
+            Some("kata"),
+        );
+    }
+
+    #[test]
+    fn parse_repo_basename_returns_none_on_garbage_input() {
+        assert!(parse_repo_basename("").is_none());
+        assert!(parse_repo_basename("/").is_none());
+        assert!(parse_repo_basename(":").is_none());
+        assert!(parse_repo_basename(".git").is_none());
+    }
 }

@@ -78,6 +78,20 @@ pub(crate) fn resolve_ai_concurrency(cli_override: Option<usize>) -> usize {
     })
 }
 
+/// Pick the project name kata reports back to the renderer.
+/// Prefers the upstream repo basename via
+/// `git config --get remote.origin.url`, falling back to the
+/// directory's leaf only when the project has no upstream. This
+/// keeps `project.name` stable across worktrees: running
+/// `kata apply` from `~/wt/<repo>/<branch>/` reports `<repo>`,
+/// not `<branch>`.
+pub(crate) async fn resolve_project_name(pj_root: &Utf8Path) -> String {
+    if let Some(name) = crate::git::repo_name_from_remote(pj_root).await {
+        return name;
+    }
+    pj_root.file_name().unwrap_or("kata-project").to_string()
+}
+
 pub mod doctor_helpers {
     use std::process::Command;
 
