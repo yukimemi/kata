@@ -19,7 +19,7 @@ use crate::ai::{AiAgent, Backend};
 use crate::applied::Decision;
 use crate::config::ProjectEntry;
 use crate::error::Result;
-use crate::manifest::{FileSpec, HowMode};
+use crate::manifest::{AiMode, FileSpec, HowMode};
 use crate::template::TemplateHandle;
 
 pub use ai::Ai;
@@ -62,6 +62,13 @@ pub struct ActionContext<'a> {
     /// for "always keep my Section X" / "respond in Japanese" /
     /// session-wide guidance. None when not provided.
     pub ai_prompt: Option<&'a str>,
+    /// `--ai-mode <chat|handoff>`: run-wide override for the
+    /// per-file `ai_mode` from the manifest. `Some(Handoff)` makes
+    /// every `how = "ai"` file go straight to handoff regardless of
+    /// the manifest, useful for sessions where the user wants to
+    /// drive the agent CLI directly. `None` means "use whatever the
+    /// manifest declares (default `Chat`)".
+    pub ai_mode_override: Option<AiMode>,
 }
 
 /// What a mode reports during `plan` (read-only preview).

@@ -9,7 +9,7 @@ use crate::ai::{agent_for_kind, resolve_backend};
 use crate::applied::AppliedState;
 use crate::config::ProjectEntry;
 use crate::error::{Error, Result};
-use crate::manifest::AgentKind;
+use crate::manifest::{AgentKind, AiMode};
 use crate::preset::TemplateRef;
 use crate::runner::{PjApplyOptions, apply_to_pj};
 use crate::ui;
@@ -25,6 +25,7 @@ pub async fn run(
     no_ai: bool,
     yes: bool,
     ai_prompt: Option<String>,
+    ai_mode_override: Option<AiMode>,
     interactive: bool,
     no_color: bool,
 ) -> Result<()> {
@@ -84,6 +85,7 @@ pub async fn run(
         yes_all: yes,
         ai_prompt,
         agent_backend,
+        ai_mode_override,
     };
     let result = apply_to_pj(
         project,

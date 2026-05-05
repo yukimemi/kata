@@ -7,7 +7,7 @@ use clap_complete::Shell;
 
 use crate::cmd;
 use crate::error::Result;
-use crate::manifest::AgentKind;
+use crate::manifest::{AgentKind, AiMode};
 
 /// `--ai <BACKEND>` choices, including the `off` shortcut for
 /// `--no-ai`. Stays separate from `manifest::AgentKind` because
@@ -34,6 +34,27 @@ impl AiBackendArg {
             AiBackendArg::Gemini => (AgentKind::Gemini, false),
             AiBackendArg::Codex => (AgentKind::Codex, false),
             AiBackendArg::Off => (AgentKind::Auto, true),
+        }
+    }
+}
+
+/// `--ai-mode <chat|handoff>` choices. Maps directly onto
+/// `manifest::AiMode` but stays a separate clap enum so the help
+/// text describes the *run-wide override* semantics specifically.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum AiModeArg {
+    /// Run kata's chezmoi-style chat dialog (default).
+    Chat,
+    /// Skip the chat loop and spawn the agent CLI interactively for
+    /// every `how = "ai"` file. kata stops re-importing.
+    Handoff,
+}
+
+impl From<AiModeArg> for AiMode {
+    fn from(a: AiModeArg) -> Self {
+        match a {
+            AiModeArg::Chat => AiMode::Chat,
+            AiModeArg::Handoff => AiMode::Handoff,
         }
     }
 }
@@ -97,6 +118,12 @@ pub enum Command {
         /// `prompt` from the manifest.
         #[arg(long = "ai-prompt", value_name = "MSG")]
         ai_prompt: Option<String>,
+        /// Run-wide override for the per-file `ai_mode`. `handoff`
+        /// makes every `how = "ai"` file go straight to the agent
+        /// CLI (kata stops re-importing); omit to honour each
+        /// manifest's declared mode (default `chat`).
+        #[arg(long = "ai-mode", value_enum, value_name = "MODE")]
+        ai_mode: Option<AiModeArg>,
     },
 
     /// Re-apply this project's templates against the recorded state.
@@ -126,6 +153,12 @@ pub enum Command {
         /// `prompt` from the manifest.
         #[arg(long = "ai-prompt", value_name = "MSG")]
         ai_prompt: Option<String>,
+        /// Run-wide override for the per-file `ai_mode`. `handoff`
+        /// makes every `how = "ai"` file go straight to the agent
+        /// CLI (kata stops re-importing); omit to honour each
+        /// manifest's declared mode (default `chat`).
+        #[arg(long = "ai-mode", value_enum, value_name = "MODE")]
+        ai_mode: Option<AiModeArg>,
     },
 
     /// Show what would change if `apply` were to run.
@@ -161,6 +194,12 @@ pub enum Command {
         /// `prompt` from the manifest.
         #[arg(long = "ai-prompt", value_name = "MSG")]
         ai_prompt: Option<String>,
+        /// Run-wide override for the per-file `ai_mode`. `handoff`
+        /// makes every `how = "ai"` file go straight to the agent
+        /// CLI (kata stops re-importing); omit to honour each
+        /// manifest's declared mode (default `chat`).
+        #[arg(long = "ai-mode", value_enum, value_name = "MODE")]
+        ai_mode: Option<AiModeArg>,
     },
 
     /// Drop a template from this project's applied state.
@@ -226,6 +265,7 @@ impl Cli {
                 no_ai,
                 yes,
                 ai_prompt,
+                ai_mode,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
                 cmd::init::run(
@@ -236,6 +276,7 @@ impl Cli {
                     no_ai,
                     yes,
                     ai_prompt,
+                    ai_mode.map(Into::into),
                     interactive,
                     no_color,
                 )
@@ -249,6 +290,7 @@ impl Cli {
                 no_ai,
                 yes,
                 ai_prompt,
+                ai_mode,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
                 cmd::apply::run(
@@ -259,6 +301,7 @@ impl Cli {
                     no_ai,
                     yes,
                     ai_prompt,
+                    ai_mode.map(Into::into),
                     interactive,
                     no_color,
                 )
@@ -274,6 +317,7 @@ impl Cli {
                 no_ai,
                 yes,
                 ai_prompt,
+                ai_mode,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
                 cmd::add::run(
@@ -285,6 +329,7 @@ impl Cli {
                     no_ai,
                     yes,
                     ai_prompt,
+                    ai_mode.map(Into::into),
                     interactive,
                     no_color,
                 )
