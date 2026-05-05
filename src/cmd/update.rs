@@ -1,4 +1,5 @@
 //! `kata update [<template>...] [--rev <ref>] [--at <dir>]`
+//!  `kata update --all [--tag <t>] [--rev <ref>]`
 //!
 //! Refresh the cache slot for one or all git-sourced templates:
 //! `git fetch --prune` to grab new commits, then `git checkout`
@@ -8,16 +9,23 @@
 //! Local templates (`./...`, absolute paths) are skipped — they
 //! are the truth of their own content; nothing to fetch.
 //!
-//! Phase 4 will add `--apply` to chain this into a re-apply run.
+//! With `--all`, walks `GlobalConfig.projects` and fans out
+//! across registered PJs in parallel (capped by
+//! `defaults.pj_concurrency`).
 
-use camino::Utf8PathBuf;
+use std::sync::Arc;
+
+use camino::{Utf8Path, Utf8PathBuf};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::applied::AppliedState;
+use crate::config::GlobalConfig;
 use crate::error::{Error, Result};
 use crate::git;
 use crate::template::{TemplateCache, source::normalise_git_url};
 
-use super::resolve_pj_root;
+use super::{resolve_pj_concurrency, resolve_pj_root, select_registered_projects};
 
 pub async fn run(
     templates_filter: Vec<String>,
@@ -33,7 +41,99 @@ pub async fn run(
         ))
     })?;
 
-    let mut applied = AppliedState::load(&pj_root)?;
+    let report = update_one_at(&pj_root, &templates_filter, &rev_override).await?;
+    for line in report {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_all(
+    tag_filter: Vec<String>,
+    rev_override: Option<String>,
+    pj_concurrency_override: Option<usize>,
+    no_color: bool,
+) -> Result<()> {
+    let _ = no_color;
+    let config = GlobalConfig::load()?;
+    let projects = select_registered_projects(&config, &tag_filter);
+    if projects.is_empty() {
+        if tag_filter.is_empty() {
+            println!(
+                "no projects registered yet — `kata register` from inside a kata-managed PJ to add one."
+            );
+        } else {
+            println!("no registered projects matched all of: {tag_filter:?}");
+        }
+        return Ok(());
+    }
+
+    let pj_concurrency = resolve_pj_concurrency(pj_concurrency_override);
+    let sema = Arc::new(Semaphore::new(pj_concurrency.max(1)));
+
+    let mut set = JoinSet::new();
+    for entry in projects {
+        let sema = sema.clone();
+        let rev_override = rev_override.clone();
+        set.spawn(async move {
+            let _permit = sema.acquire_owned().await.expect("sema closed");
+            let label = entry.name.clone();
+            let path = entry.path.clone();
+            // `--all` doesn't take a per-template filter — that
+            // axis is per-call, not per-PJ. Always update every
+            // template each PJ has applied.
+            let outcome = update_one_at(&path, &[], &rev_override).await;
+            (label, path, outcome)
+        });
+    }
+
+    let mut total_errors = 0usize;
+    while let Some(joined) = set.join_next().await {
+        let (label, path, result) = match joined {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[panic] join task: {e}");
+                total_errors += 1;
+                continue;
+            }
+        };
+        println!("\n=== {label} ({path}) ===");
+        match result {
+            Ok(report) => {
+                for line in &report {
+                    println!("{line}");
+                    if line.starts_with("FAIL ") {
+                        total_errors += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  error: {e}");
+                total_errors += 1;
+            }
+        }
+    }
+
+    if total_errors > 0 {
+        return Err(Error::Other(anyhow::anyhow!(
+            "{total_errors} template(s) failed across the registry"
+        )));
+    }
+    Ok(())
+}
+
+/// Run the per-template fetch / checkout / rev-bump loop against
+/// a single project root, returning a report (one line per
+/// template). Pure data: no stdout writes here so the caller can
+/// route the output (immediate `println!` for single-PJ, grouped
+/// per-section for `--all`).
+async fn update_one_at(
+    pj_root: &Utf8Path,
+    templates_filter: &[String],
+    rev_override: &Option<String>,
+) -> Result<Vec<String>> {
+    let mut applied = AppliedState::load(pj_root)?;
     if applied.templates.is_empty() {
         return Err(Error::Config(format!(
             "{pj_root}: applied.toml has no templates recorded"
@@ -60,7 +160,6 @@ pub async fn run(
         let url = normalise_git_url(&tmpl.source);
         let slot = cache.slot(&url);
 
-        // Make sure the slot is a real git repo; otherwise (re-)clone.
         // Per-template failures push a FAIL line and continue so a
         // single broken upstream doesn't abort the whole run.
         if !slot.join(".git").is_dir() {
@@ -93,18 +192,11 @@ pub async fn run(
             continue;
         }
 
-        // Resolve the requested rev (or just take HEAD's fresh value
-        // post-fetch). `kata update --rev v0.2.0 pj-rust` jumps the
-        // cache to v0.2.0; `kata update pj-rust` (no --rev) takes
-        // whatever the default branch's HEAD now points at.
-        let target = match &rev_override {
+        let target = match rev_override {
             Some(r) => r.clone(),
             None => "HEAD".to_string(),
         };
         if let Err(e) = git::checkout(slot.as_path(), &target).await {
-            // Fallback: if the user-provided rev or `HEAD` can't
-            // resolve in the freshly-fetched slot, surface but keep
-            // going for siblings.
             report.push(format!("FAIL {}: {e}", tmpl.source));
             continue;
         }
@@ -128,25 +220,17 @@ pub async fn run(
         }
     }
 
-    applied.save(&pj_root)?;
-    for line in report {
-        println!("{line}");
-    }
-    Ok(())
+    applied.save(pj_root)?;
+    Ok(report)
 }
 
 fn is_local_source(s: &str) -> bool {
-    // POSIX-style relative / absolute paths.
     if s.starts_with("./") || s.starts_with("../") || s.starts_with('/') {
         return true;
     }
-    // Windows backslash variants: relative (`.\`, `..\`), drive root
-    // (`\foo`), UNC share (`\\server\share`) and verbatim
-    // (`\\?\C:\...`).
     if s.starts_with(".\\") || s.starts_with("..\\") || s.starts_with('\\') {
         return true;
     }
-    // Windows drive-qualified absolute path: `C:/...` or `C:\...`.
     let bytes = s.as_bytes();
     bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
