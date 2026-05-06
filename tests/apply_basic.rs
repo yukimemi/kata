@@ -656,8 +656,12 @@ fn unchanged_files_are_recorded_in_applied_toml() {
         .join("\n");
     write(&applied_path, &new_body);
 
-    // 3) Re-create files with exact template content
-    write(&pj.join("Makefile.toml"), "name = demo\n");
+    // 3) Re-create files with exact template content.
+    //    Makefile.toml has no .tera suffix, so render_or_passthrough
+    //    returns the raw template body "name = {{ vars.project }}\n".
+    //    Write that exact body so apply sees an identical file and
+    //    triggers OutcomeKind::Unchanged.
+    write(&pj.join("Makefile.toml"), "name = {{ vars.project }}\n");
     write(&pj.join("LICENSE"), "MIT\n");
 
     // 4) Re-apply (files will be "unchanged" but must be recorded)

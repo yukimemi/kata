@@ -140,6 +140,7 @@ pub async fn apply_to_pj(
     let mut actions = Vec::new();
     let mut errors = Vec::new();
     let mut applied_templates: Vec<AppliedTemplate> = Vec::new();
+    let mut has_any_write = false;
 
     for handle in &handles {
         applied_templates.push(AppliedTemplate {
@@ -253,6 +254,11 @@ pub async fn apply_to_pj(
                 fs.once_applied = fs.once_applied || once_applied;
                 fs.content_hash = Some(hash_content(action_ctx.rendered_body.as_bytes()));
                 applied.record(&state_key, fs);
+
+                // Track actual writes for applied_at
+                if matches!(outcome.kind, OutcomeKind::Wrote) {
+                    has_any_write = true;
+                }
             }
 
             actions.push((dst_rel, outcome.kind));
@@ -269,7 +275,9 @@ pub async fn apply_to_pj(
         // depending on cwd at the time of re-apply.
         applied.base_dir = Some(base_dir);
         applied.templates = applied_templates;
-        applied.applied_at = Some(Timestamp::now());
+        if has_any_write {
+            applied.applied_at = Some(Timestamp::now());
+        }
         applied.vars = vars;
         applied.save(&pj_root)?;
     }
