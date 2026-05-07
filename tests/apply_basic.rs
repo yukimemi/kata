@@ -588,3 +588,182 @@ fn init_refuses_dst_path_traversal() {
 // `init_refuses_remote_preset_in_phase_1` retired — Phase 2-c2
 // turned this into a supported case. End-to-end git-preset coverage
 // is in `tests/git_preset.rs`.
+
+#[test]
+fn unchanged_files_are_recorded_in_applied_toml() {
+    // Issue #16: unchanged files should be recorded in applied.toml
+    // so that `when = "once"` guard and drift detection work correctly.
+    //
+    // Strategy: Run `kata init`, then REMOVE the [files] section
+    // from applied.toml to simulate the bug (files written but not
+    // tracked). Re-create files with exact template content and
+    // re-apply. The second apply will see them as "unchanged" and
+    // (after fix) must record them.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [vars]
+            project = { default = "demo" }
+            [[file]]
+            src = "Makefile.toml"
+            how = "overwrite"
+            when = "always"
+            [[file]]
+            src = "LICENSE"
+            how = "overwrite"
+            when = "once"
+            "#,
+        )
+        .file("Makefile.toml", "name = {{ vars.project }}\n")
+        .file("LICENSE", "MIT\n");
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    // 1) init writes the files and records them in applied.toml
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // 2) Remove [files] section from applied.toml to simulate the
+    //    bug where unchanged files were not recorded
+    let applied_path = pj.join(".kata/applied.toml");
+    let applied_body = std::fs::read_to_string(&applied_path).unwrap();
+    // Remove the [files] section
+    let new_body: String = applied_body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("[files"))
+        .filter(|line| !line.trim_start().starts_with("content_hash"))
+        .filter(|line| !line.trim_start().starts_with("once_applied"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(&applied_path, &new_body);
+
+    // 3) Re-create files with exact template content
+    write(&pj.join("Makefile.toml"), "name = demo\n");
+    write(&pj.join("LICENSE"), "MIT\n");
+
+    // 4) Re-apply (files will be "unchanged" but must be recorded)
+    kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // 5) applied.toml MUST record both files
+    let applied_body = std::fs::read_to_string(&applied_path).unwrap();
+
+    // Parse applied.toml to verify
+    let applied: toml::Table = toml::from_str(&applied_body).unwrap();
+    let files = applied["files"].as_table().expect("files table must exist");
+
+    assert!(
+        files.contains_key("Makefile.toml"),
+        "Makefile.toml should be recorded in applied.toml even when unchanged: {applied_body}"
+    );
+    assert!(
+        files.contains_key("LICENSE"),
+        "LICENSE should be recorded in applied.toml even when unchanged: {applied_body}"
+    );
+
+    // content_hash must be populated
+    let makefile_state = files["Makefile.toml"].as_table().unwrap();
+    assert!(
+        makefile_state.contains_key("content_hash"),
+        "Makefile.toml must have content_hash: {makefile_state:?}"
+    );
+
+    let license_state = files["LICENSE"].as_table().unwrap();
+    assert!(
+        license_state.contains_key("content_hash"),
+        "LICENSE must have content_hash: {license_state:?}"
+    );
+
+    // once_applied must be true for LICENSE (when = "once")
+    let once_applied = license_state
+        .get("once_applied")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(
+        once_applied,
+        "LICENSE (when = once) must have once_applied = true"
+    );
+}
+
+#[test]
+fn once_file_unchanged_on_first_apply_still_guards_later() {
+    // Issue #16 follow-up: if a `when = "once"` file lands as
+    // unchanged on the very first apply, the once guard must still
+    // fire on subsequent applies when the user edits the file.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "README.md"
+            how = "overwrite"
+            when = "once"
+            "#,
+        )
+        .file("README.md", "# Demo\n");
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    // 1) init (file written)
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // 2) Edit the file (simulate user edit)
+    write(&pj.join("README.md"), "# User Edit\n");
+
+    // 3) Re-apply: once guard should fire, NOT the re-write path
+    kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // 4) User edit must be preserved
+    let body = std::fs::read_to_string(pj.join("README.md")).unwrap();
+    assert!(
+        body.contains("User Edit"),
+        "once-mode file should be preserved when guard fires: {body}"
+    );
+}
