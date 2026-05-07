@@ -243,7 +243,11 @@ pub async fn apply_to_pj(
             }
 
             // Update applied state on success (skip when dry-run).
-            if !opts.dry_run && matches!(outcome.kind, OutcomeKind::Wrote) {
+            // Also record unchanged files so applied.toml tracks every
+            // file the template delivers (needed for `when = "once"`
+            // guard and drift detection).
+            if !opts.dry_run && matches!(outcome.kind, OutcomeKind::Wrote | OutcomeKind::Unchanged)
+            {
                 let once_applied = matches!(spec.when, WhenMode::Once);
                 let mut fs = applied.files.get(&state_key).cloned().unwrap_or_default();
                 fs.once_applied = fs.once_applied || once_applied;
