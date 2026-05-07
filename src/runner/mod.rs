@@ -140,6 +140,7 @@ pub async fn apply_to_pj(
     let mut actions = Vec::new();
     let mut errors = Vec::new();
     let mut applied_templates: Vec<AppliedTemplate> = Vec::new();
+    let mut has_any_write = false;
 
     for handle in &handles {
         applied_templates.push(AppliedTemplate {
@@ -243,12 +244,21 @@ pub async fn apply_to_pj(
             }
 
             // Update applied state on success (skip when dry-run).
-            if !opts.dry_run && matches!(outcome.kind, OutcomeKind::Wrote) {
+            // Also record unchanged files so applied.toml tracks every
+            // file the template delivers (needed for `when = "once"`
+            // guard and drift detection).
+            if !opts.dry_run && matches!(outcome.kind, OutcomeKind::Wrote | OutcomeKind::Unchanged)
+            {
                 let once_applied = matches!(spec.when, WhenMode::Once);
                 let mut fs = applied.files.get(&state_key).cloned().unwrap_or_default();
                 fs.once_applied = fs.once_applied || once_applied;
                 fs.content_hash = Some(hash_content(action_ctx.rendered_body.as_bytes()));
                 applied.record(&state_key, fs);
+
+                // Track actual writes for applied_at
+                if matches!(outcome.kind, OutcomeKind::Wrote) {
+                    has_any_write = true;
+                }
             }
 
             actions.push((dst_rel, outcome.kind));
@@ -265,7 +275,9 @@ pub async fn apply_to_pj(
         // depending on cwd at the time of re-apply.
         applied.base_dir = Some(base_dir);
         applied.templates = applied_templates;
-        applied.applied_at = Some(Timestamp::now());
+        if has_any_write {
+            applied.applied_at = Some(Timestamp::now());
+        }
         applied.vars = vars;
         applied.save(&pj_root)?;
     }
