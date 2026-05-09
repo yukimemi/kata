@@ -100,6 +100,13 @@ pub enum PlanKind {
     SkippedWhen,
     /// `when = "once"` already applied
     SkippedOnce,
+    /// `when = "once"` and dst already exists on first apply —
+    /// adopt the consumer's existing content instead of overwriting
+    /// it. Recorded as `once_applied = true` so subsequent applies
+    /// keep skipping; `content_hash` stays unset since `once` is
+    /// the consumer's free zone (drift-tracking it would just emit
+    /// noise on every consumer edit).
+    AdoptedExisting,
     /// dst content has diverged in a way the mode can't auto-resolve
     Diverged,
 }
@@ -117,6 +124,10 @@ pub enum OutcomeKind {
     Wrote,
     Unchanged,
     Skipped,
+    /// `when = "once"` and dst already exists on first apply —
+    /// kept as-is, `once_applied = true` recorded so subsequent
+    /// applies skip. See `PlanKind::AdoptedExisting`.
+    Adopted,
     Failed,
 }
 
