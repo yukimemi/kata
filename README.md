@@ -86,7 +86,11 @@ spec [described in AGENTS.md](./AGENTS.md): `<source>[@<rev>][//<subdir>][:<pres
 | [`yukimemi/pj-base`](https://github.com/yukimemi/pj-base) | Language-agnostic boilerplate (LICENSE, …) |
 | [`yukimemi/pj-rust`](https://github.com/yukimemi/pj-rust) | Rust language layer (Makefile.toml, CI matrix, rust-toolchain) |
 | [`yukimemi/pj-rust-cli`](https://github.com/yukimemi/pj-rust-cli) | Rust CLI extras (.editorconfig, …) |
-| [`yukimemi/pj-presets`](https://github.com/yukimemi/pj-presets) | Preset bundles (`rust-cli.toml`, …) |
+| [`yukimemi/pj-rust-lib`](https://github.com/yukimemi/pj-rust-lib) | Rust library extras (crates.io publish, no binaries) |
+| [`yukimemi/pj-pnpm`](https://github.com/yukimemi/pj-pnpm) | pnpm / TypeScript language layer (package.json, tsconfig refs, pnpm renri hook) |
+| [`yukimemi/pj-react-web`](https://github.com/yukimemi/pj-react-web) | Vite + React + TS + Tailwind framework layer |
+| [`yukimemi/pj-firebase`](https://github.com/yukimemi/pj-firebase) | Firebase Hosting + Firestore + Storage + Vercel mirror |
+| [`yukimemi/pj-presets`](https://github.com/yukimemi/pj-presets) | Preset bundles (`rust-cli`, `rust-lib`, `web-react`, `web-react-firebase`) |
 
 `kata` itself dogfoods these — the `Makefile.toml` / CI / etc. in
 this repo are managed by `kata apply` from `pj-presets:rust-cli`.
