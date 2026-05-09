@@ -29,10 +29,14 @@ pub struct PjApplyOptions {
     pub no_ai: bool,
     pub interactive: bool,
     pub cli_vars: BTreeMap<String, toml::Value>,
-    /// Treat `when = "once"` files as eligible for application even
-    /// when applied state already has them — set by `kata init`,
-    /// false by `kata apply` so once-files only fire on the first
-    /// run.
+    /// Force re-firing `when = "once"` files even when
+    /// `applied.toml` already records them as `once_applied =
+    /// true`. Currently always `false` for `init` / `apply` /
+    /// `add` — once-files normally fire on the first run via the
+    /// `once_applied` record being absent, and a pre-existing
+    /// file on first run is treated as adoption (kept as-is).
+    /// Reserved for a future `--force-once` flag that explicitly
+    /// re-runs the template's body over the consumer's content.
     pub force_once: bool,
     /// `--yes`: accept AI-generated bodies non-interactively. The
     /// chezmoi-style per-file dialog (Phase 3-b3) flips this on
@@ -171,6 +175,35 @@ pub async fn apply_to_pj(
                         continue;
                     }
                 }
+                // Adoption flow: kata is being introduced into a project
+                // that already has a file matching this once-entry.
+                // Treat the on-disk content as the consumer's chosen
+                // "once" — record `once_applied = true` and move on
+                // without overwriting. `content_hash` is explicitly
+                // cleared (not just left at default) so a stale hash
+                // from an older kata version that did record once
+                // hashes can't sneak through and trip drift detection.
+                if dst_abs.is_file() {
+                    if !opts.dry_run {
+                        let mut fs = applied.files.get(&state_key).cloned().unwrap_or_default();
+                        fs.once_applied = true;
+                        fs.content_hash = None;
+                        applied.record(&state_key, fs);
+                    }
+                    actions.push((dst_rel, OutcomeKind::Adopted));
+                    continue;
+                }
+                // Destination exists but isn't a regular file (likely
+                // a directory or non-regular special file). Refuse
+                // rather than `once_applied`-marking it — adopting
+                // would permanently mask an invalid template
+                // destination shape.
+                if dst_abs.exists() {
+                    let msg = format!("destination exists but is not a regular file: {dst_abs}");
+                    errors.push((dst_rel.clone(), msg));
+                    actions.push((dst_rel, OutcomeKind::Failed));
+                    continue;
+                }
             }
             // when = "manual" is never auto-applied here — Phase 1
             // doesn't expose --file targeting yet.
@@ -252,7 +285,20 @@ pub async fn apply_to_pj(
                 let once_applied = matches!(spec.when, WhenMode::Once);
                 let mut fs = applied.files.get(&state_key).cloned().unwrap_or_default();
                 fs.once_applied = fs.once_applied || once_applied;
-                fs.content_hash = Some(hash_content(action_ctx.rendered_body.as_bytes()));
+                // `once` files are consumer-owned after the first
+                // write — don't track their content_hash so `kata
+                // status` doesn't emit drift noise on every later
+                // consumer edit. The existing `Some(expected) else
+                // continue` guard in `cmd::status::check_drift` then
+                // skips them automatically. We also explicitly clear
+                // any pre-existing hash on the once branch so a
+                // forced re-apply (`force_once`) over a previously
+                // hashed entry doesn't leave a stale value behind.
+                if once_applied {
+                    fs.content_hash = None;
+                } else {
+                    fs.content_hash = Some(hash_content(action_ctx.rendered_body.as_bytes()));
+                }
                 applied.record(&state_key, fs);
 
                 // Track actual writes for applied_at
@@ -388,6 +434,21 @@ pub async fn plan_pj(
                         out.push((dst_rel, crate::modes::PlanKind::SkippedOnce, None));
                         continue;
                     }
+                }
+                // First-time apply but the consumer already has the
+                // file — `apply` will adopt it as-is. Mirror that in
+                // the preview so `kata status` doesn't promise an
+                // overwrite that won't happen. `is_file()` (not
+                // `exists()`) so a directory at `dst` shows up as
+                // `Diverged`, matching how the runner refuses to
+                // adopt non-regular files.
+                if dst_abs.is_file() {
+                    out.push((dst_rel, crate::modes::PlanKind::AdoptedExisting, None));
+                    continue;
+                }
+                if dst_abs.exists() {
+                    out.push((dst_rel, crate::modes::PlanKind::Diverged, None));
+                    continue;
                 }
             }
             if spec.when == WhenMode::Manual {

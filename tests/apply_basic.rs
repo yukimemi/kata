@@ -688,20 +688,25 @@ fn unchanged_files_are_recorded_in_applied_toml() {
         "LICENSE should be recorded in applied.toml even when unchanged: {applied_body}"
     );
 
-    // content_hash must be populated
+    // `Makefile.toml` is `when = "always"` — drift detection
+    // applies, so content_hash must be populated.
     let makefile_state = files["Makefile.toml"].as_table().unwrap();
     assert!(
         makefile_state.contains_key("content_hash"),
-        "Makefile.toml must have content_hash: {makefile_state:?}"
+        "Makefile.toml (when = always) must have content_hash: {makefile_state:?}"
     );
 
+    // `LICENSE` is `when = "once"` — consumer's free zone after
+    // first write. We deliberately don't record content_hash so
+    // `kata status` doesn't emit drift on every later consumer
+    // edit. `once_applied = true` is what guards subsequent
+    // applies; content_hash being absent is expected.
     let license_state = files["LICENSE"].as_table().unwrap();
     assert!(
-        license_state.contains_key("content_hash"),
-        "LICENSE must have content_hash: {license_state:?}"
+        !license_state.contains_key("content_hash"),
+        "LICENSE (when = once) should NOT have content_hash recorded: {license_state:?}"
     );
 
-    // once_applied must be true for LICENSE (when = "once")
     let once_applied = license_state
         .get("once_applied")
         .and_then(|v| v.as_bool())
@@ -769,5 +774,315 @@ fn once_file_unchanged_on_first_apply_still_guards_later() {
     assert!(
         body.contains("User Edit"),
         "once-mode file should be preserved when guard fires: {body}"
+    );
+}
+
+#[test]
+fn once_existing_file_is_adopted_not_overwritten() {
+    // Issue #37: when `kata init` is run against a project that
+    // already has a file matching a `when = "once"` entry, the
+    // pre-existing content must be kept and `once_applied = true`
+    // recorded — adoption flow, not destructive overwrite.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "tailwind.config.js"
+            how = "overwrite"
+            when = "once"
+            "#,
+        )
+        .file(
+            "tailwind.config.js",
+            "export default { theme: { extend: {} } };\n",
+        );
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+    let pj = td.path().join("demo");
+    std::fs::create_dir_all(&pj).unwrap();
+
+    // 1) Pre-existing project content (e.g. project-specific
+    //    Tailwind theme that the consumer wrote before adopting
+    //    kata).
+    let consumer_body = "export default { theme: { extend: { colors: { brand: '#A52A1F' } } } };\n";
+    write(&pj.join("tailwind.config.js"), consumer_body);
+
+    // 2) `kata init` against the existing project.
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // 3) The consumer's content must survive — no overwrite.
+    let body = std::fs::read_to_string(pj.join("tailwind.config.js")).unwrap();
+    assert_eq!(
+        body, consumer_body,
+        "pre-existing once-mode file must be adopted as-is, not overwritten"
+    );
+
+    // 4) `applied.toml` must record `once_applied = true` so
+    //    subsequent applies keep skipping.
+    let applied_path = pj.join(".kata/applied.toml");
+    let applied_body = std::fs::read_to_string(&applied_path).unwrap();
+    let applied_doc: toml::Table = toml::from_str(&applied_body).unwrap();
+    let files = applied_doc["files"].as_table().unwrap();
+    let state = files["tailwind.config.js"].as_table().unwrap();
+    assert_eq!(
+        state.get("once_applied").and_then(|v| v.as_bool()),
+        Some(true),
+        "adopted file must be marked once_applied = true: {state:?}"
+    );
+
+    // 5) content_hash must NOT be recorded for once entries
+    //    (consumer's free zone — drift would just emit noise).
+    assert!(
+        !state.contains_key("content_hash"),
+        "adopted (once) file should NOT have content_hash: {state:?}"
+    );
+}
+
+#[test]
+fn once_does_not_adopt_a_directory_at_dst() {
+    // Adoption must only fire when the destination is a regular
+    // file. A directory at `dst` is an invalid template
+    // destination shape that we shouldn't permanently mask
+    // behind `once_applied = true` (CodeRabbit review feedback
+    // on PR #38).
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "config.js"
+            how = "overwrite"
+            when = "once"
+            "#,
+        )
+        .file("config.js", "// template default\n");
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+    let pj = td.path().join("demo");
+    std::fs::create_dir_all(&pj).unwrap();
+
+    // Pre-existing *directory* (not a file) at the once-target
+    // path. Adoption must refuse, not silently mark it
+    // `once_applied`.
+    std::fs::create_dir_all(pj.join("config.js")).unwrap();
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .failure();
+
+    // The directory must still be there (kata didn't overwrite
+    // it), and `applied.toml` must NOT have flagged config.js
+    // as `once_applied = true` — leaving the destination shape
+    // free to be diagnosed and fixed.
+    assert!(
+        pj.join("config.js").is_dir(),
+        "directory at dst should be left intact"
+    );
+    let applied_path = pj.join(".kata/applied.toml");
+    if applied_path.exists() {
+        let applied_body = std::fs::read_to_string(&applied_path).unwrap();
+        let applied_doc: toml::Table = toml::from_str(&applied_body).unwrap();
+        if let Some(files) = applied_doc.get("files").and_then(|v| v.as_table()) {
+            if let Some(state) = files.get("config.js").and_then(|v| v.as_table()) {
+                let once_applied = state
+                    .get("once_applied")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                assert!(
+                    !once_applied,
+                    "directory at dst must not be flagged once_applied: {state:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn once_adoption_makes_subsequent_apply_a_noop() {
+    // After adoption, `kata apply` must keep skipping the file
+    // even if the consumer edits it further — same guarantee as
+    // the standard "once was written, then edited" flow.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "config.js"
+            how = "overwrite"
+            when = "once"
+            "#,
+        )
+        .file("config.js", "// template default\n");
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+    let pj = td.path().join("demo");
+    std::fs::create_dir_all(&pj).unwrap();
+
+    // Pre-existing consumer file before adoption.
+    write(&pj.join("config.js"), "// consumer original\n");
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // Consumer continues to edit after adoption.
+    write(&pj.join("config.js"), "// consumer edited later\n");
+
+    // Re-apply must still skip — once_applied flag wins.
+    kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    let body = std::fs::read_to_string(pj.join("config.js")).unwrap();
+    assert_eq!(
+        body, "// consumer edited later\n",
+        "subsequent apply must not touch an adopted once file"
+    );
+}
+
+#[test]
+fn once_status_does_not_threaten_to_overwrite_consumer_edits() {
+    // Issue #37 design follow-on: `once` is the consumer's free
+    // zone after first write. After a consumer edits a once
+    // file, `kata status` must show `skip(once)` (not `update`)
+    // so the consumer isn't told kata is about to overwrite
+    // their work.
+    //
+    // The `always` sibling is the control: it must show
+    // `update` to confirm `status` does flag real overwrites.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "Makefile.toml"
+            how = "overwrite"
+            when = "always"
+            [[file]]
+            src = "LICENSE"
+            how = "overwrite"
+            when = "once"
+            "#,
+        )
+        .file("Makefile.toml", "[tasks.run]\n")
+        .file("LICENSE", "MIT\n");
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // Consumer edits both files.
+    write(&pj.join("Makefile.toml"), "[tasks.run]\nedited = true\n");
+    write(&pj.join("LICENSE"), "MIT\n# consumer addition\n");
+
+    // status: `always` Makefile → `update` (drift), `once`
+    // LICENSE → `skip(once)` (kata won't touch it).
+    let assert = kata(td.path())
+        .args(["status", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    // Line-paired so a token from one row can't satisfy the
+    // other's assertion by accident (CodeRabbit nitpick).
+    let has_update_makefile = stdout
+        .lines()
+        .any(|l| l.contains("update") && l.contains("Makefile.toml"));
+    assert!(
+        has_update_makefile,
+        "always-mode edit must surface as update in status:\n{stdout}"
+    );
+    let has_skip_once_license = stdout
+        .lines()
+        .any(|l| l.contains("skip(once)") && l.contains("LICENSE"));
+    assert!(
+        has_skip_once_license,
+        "once-mode edit must surface as skip(once), not update:\n{stdout}"
+    );
+    // Sanity: there must be no line that pairs `update` with
+    // `LICENSE` — `update` LICENSE would mean kata is about to
+    // overwrite the consumer's edit, which is exactly the
+    // surprise we're preventing.
+    let bad_update_license = stdout
+        .lines()
+        .any(|l| l.contains("update") && l.contains("LICENSE"));
+    assert!(
+        !bad_update_license,
+        "status must not threaten to `update` a once file:\n{stdout}"
     );
 }

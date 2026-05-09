@@ -23,6 +23,7 @@ pub fn print_outcome(dst: &str, kind: OutcomeKind, no_color: bool) {
         OutcomeKind::Wrote => ("wrote", "wrote     "),
         OutcomeKind::Unchanged => ("unchanged", "unchanged "),
         OutcomeKind::Skipped => ("skipped", "skipped   "),
+        OutcomeKind::Adopted => ("adopted", "adopted   "),
         OutcomeKind::Failed => ("failed", "failed    "),
     };
     let _ = label;
@@ -31,6 +32,7 @@ pub fn print_outcome(dst: &str, kind: OutcomeKind, no_color: bool) {
             OutcomeKind::Wrote => println!("  {} {}", "wrote    ".green().bold(), dst),
             OutcomeKind::Unchanged => println!("  {} {}", "unchanged".dimmed(), dst),
             OutcomeKind::Skipped => println!("  {} {}", "skipped  ".yellow(), dst),
+            OutcomeKind::Adopted => println!("  {} {}", "adopted  ".blue().bold(), dst),
             OutcomeKind::Failed => println!("  {} {}", "failed   ".red().bold(), dst),
         }
     } else {
@@ -46,6 +48,7 @@ pub fn print_plan(dst: &str, kind: PlanKind, no_color: bool) {
         PlanKind::Unchanged => "ok",
         PlanKind::SkippedWhen => "skip(when)",
         PlanKind::SkippedOnce => "skip(once)",
+        PlanKind::AdoptedExisting => "adopt",
         PlanKind::Diverged => "diverged",
     };
     if color_enabled(no_color) {
@@ -56,6 +59,7 @@ pub fn print_plan(dst: &str, kind: PlanKind, no_color: bool) {
             PlanKind::SkippedWhen | PlanKind::SkippedOnce => {
                 format!("{:<10}", label).yellow().to_string()
             }
+            PlanKind::AdoptedExisting => format!("{:<10}", label).blue().bold().to_string(),
             PlanKind::Diverged => format!("{:<10}", label).red().bold().to_string(),
         };
         println!("  {} {}", coloured, dst);

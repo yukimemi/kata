@@ -81,7 +81,14 @@ pub async fn run(
         no_ai,
         interactive,
         cli_vars: parse_cli_vars(vars)?,
-        force_once: true, // init runs once-files
+        // `init` is the first apply against this PJ — once-files
+        // fire naturally because they're not yet recorded as
+        // `once_applied = true`. Forcing here would only matter
+        // when re-initialising over an existing `applied.toml`,
+        // and in that case we want to honour the consumer's
+        // existing once content (adoption flow) rather than
+        // overwrite it.
+        force_once: false,
         yes_all: yes,
         ai_prompt,
         agent_backend,
