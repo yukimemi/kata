@@ -117,13 +117,15 @@ pub async fn apply_to_pj(
         }
     }
 
-    // 3. Resolve vars (precedence: CLI > env > applied > preset >
-    //    default > prompt). The prompter closure delegates to the
-    //    interactive layer.
+    // 3. Resolve vars (precedence: CLI > env > .kata/vars.toml >
+    //    applied > preset > default > prompt). The prompter closure
+    //    delegates to the interactive layer.
     let env_vars = VarSources::from_env();
+    let vars_file = VarSources::load_vars_file(&pj_root)?;
     let sources = VarSources {
         cli: opts.cli_vars.clone(),
         env: env_vars,
+        vars_file,
         applied: applied.vars.clone(),
         preset: preset_vars,
     };
@@ -402,9 +404,11 @@ pub async fn plan_pj(
         }
     }
     let env_vars = VarSources::from_env();
+    let vars_file = VarSources::load_vars_file(&pj_root)?;
     let sources = VarSources {
         cli: cli_vars,
         env: env_vars,
+        vars_file,
         applied: applied.vars.clone(),
         preset: preset_vars,
     };
