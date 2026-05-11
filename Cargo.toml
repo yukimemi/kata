@@ -57,7 +57,7 @@ jiff = { version = "0.2", features = ["serde"] }
 
 # UI
 inquire = "0.7"
-indicatif = "0.18"
+indicatif = "0.18.4"
 similar = "3"
 owo-colors = "4"
 
