@@ -77,7 +77,7 @@ which = "7"
 # Secure tmp file allocation for the AI handoff prompt — must live
 # in [dependencies] (not just [dev-dependencies]) because
 # `ai::process::run_handoff` writes the prompt file at runtime.
-tempfile = "3"
+tempfile = "3.27.0"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
