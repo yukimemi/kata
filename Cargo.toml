@@ -50,7 +50,7 @@ anyhow = "1.0.102"
 
 # Filesystem / paths
 camino = { version = "1.2.2", features = ["serde1"] }
-directories = "5"
+directories = "5.0.1"
 
 # Time
 jiff = { version = "0.2", features = ["serde"] }
