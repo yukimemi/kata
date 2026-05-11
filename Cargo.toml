@@ -56,7 +56,7 @@ directories = "5.0.1"
 jiff = { version = "0.2.24", features = ["serde"] }
 
 # UI
-inquire = "0.7"
+inquire = "0.9.4"
 indicatif = "0.18.4"
 similar = "3.1.0"
 owo-colors = "4.3.0"
