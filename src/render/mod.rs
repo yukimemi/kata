@@ -9,7 +9,7 @@ use teravars::{Context, Engine};
 use crate::error::Result;
 
 pub use context::{KataInfo, ProjectInfo, build_context};
-pub use vars::{VarResolver, VarSources, parse_cli_var};
+pub use vars::{ResolvedVars, VarResolver, VarSource, VarSources, deep_merge_table, parse_cli_var};
 
 /// kata's renderer. The wrapper exists so we can register
 /// kata-flavour helpers / filters without leaking the dependency on

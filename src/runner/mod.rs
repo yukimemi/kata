@@ -20,7 +20,7 @@ use crate::error::{Error, Result};
 use crate::manifest::{AiMode, FileSpec, VarSpec, WhenMode};
 use crate::modes::{ActionContext, OutcomeKind, for_how};
 use crate::preset::TemplateRef;
-use crate::render::{Renderer, VarResolver, VarSources, build_context};
+use crate::render::{Renderer, VarResolver, VarSources, build_context, deep_merge_table};
 use crate::template::TemplateHandle;
 
 #[derive(Debug, Clone)]
@@ -118,16 +118,22 @@ pub async fn apply_to_pj(
     }
 
     // 3. Resolve vars (precedence: CLI > env > .kata/vars.toml >
-    //    applied > preset > default > prompt). The prompter closure
-    //    delegates to the interactive layer.
+    //    applied > preset > template seed > default > prompt). The
+    //    prompter closure delegates to the interactive layer.
+    //    The template seed is loaded from any `[[file]]` declaration
+    //    targeting `.kata/vars.toml`, so a first-time consumer can
+    //    render `.tera` files that reference `{{ vars.* }}` before
+    //    the seed has actually been written to disk (#53).
     let env_vars = VarSources::from_env();
     let vars_file = VarSources::load_vars_file(&pj_root)?;
+    let template_seed = collect_template_seed_vars(&handles)?;
     let sources = VarSources {
         cli: opts.cli_vars.clone(),
         env: env_vars,
         vars_file,
         applied: applied.vars.clone(),
         preset: preset_vars,
+        template_seed,
     };
     let resolver = VarResolver {
         specs: &all_specs,
@@ -135,11 +141,12 @@ pub async fn apply_to_pj(
         interactive: opts.interactive,
         prompter: |name: &str, spec: &VarSpec| crate::interactive::prompt_var(name, spec),
     };
-    let vars = resolver.resolve()?;
+    let resolved = resolver.resolve()?;
+    let vars = &resolved.values;
 
     // 4. Build the rendering context once per PJ — Phase 1 has no
     //    per-file context overrides.
-    let ctx = build_context(&project, &pj_root, &vars);
+    let ctx = build_context(&project, &pj_root, vars);
     let mut renderer = Renderer::new();
 
     // 5. Walk templates × files in compose order.
@@ -244,7 +251,7 @@ pub async fn apply_to_pj(
                 dst_abs: dst_abs.clone(),
                 rendered_body,
                 current_body,
-                vars: &vars,
+                vars,
                 tera_ctx: &ctx,
                 agent: agent.clone(),
                 agent_backend: opts.agent_backend,
@@ -326,7 +333,22 @@ pub async fn apply_to_pj(
         if has_any_write {
             applied.applied_at = Some(Timestamp::now());
         }
-        applied.vars = vars;
+        // Only persist vars whose resolution source is user-typed
+        // (CLI / env / prompt). Everything else already lives in a
+        // tracked source the renderer can re-read on next apply — no
+        // need to duplicate. See yukimemi/kata#58.
+        applied.vars = resolved
+            .values
+            .iter()
+            .filter(|(k, _)| {
+                resolved
+                    .sources
+                    .get(k.as_str())
+                    .copied()
+                    .is_some_and(|s| s.should_persist_in_applied())
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         applied.save(&pj_root)?;
     }
 
@@ -405,12 +427,14 @@ pub async fn plan_pj(
     }
     let env_vars = VarSources::from_env();
     let vars_file = VarSources::load_vars_file(&pj_root)?;
+    let template_seed = collect_template_seed_vars(&handles)?;
     let sources = VarSources {
         cli: cli_vars,
         env: env_vars,
         vars_file,
         applied: applied.vars.clone(),
         preset: preset_vars,
+        template_seed,
     };
     let resolver = VarResolver {
         specs: &all_specs,
@@ -418,8 +442,9 @@ pub async fn plan_pj(
         interactive,
         prompter: |name: &str, spec: &VarSpec| crate::interactive::prompt_var(name, spec),
     };
-    let vars = resolver.resolve()?;
-    let ctx = build_context(&project, &pj_root, &vars);
+    let resolved = resolver.resolve()?;
+    let vars = &resolved.values;
+    let ctx = build_context(&project, &pj_root, vars);
     let mut renderer = Renderer::new();
 
     let mut out = Vec::new();
@@ -486,7 +511,7 @@ pub async fn plan_pj(
                 dst_abs: dst_abs.clone(),
                 rendered_body,
                 current_body,
-                vars: &vars,
+                vars,
                 tera_ctx: &ctx,
                 agent: None,
                 agent_backend: None,
@@ -510,6 +535,63 @@ pub async fn plan_pj(
 /// `std::fs::read_to_string`, so binary files aren't supported in
 /// templates (tracked separately; not a Phase 1/2 concern).
 ///
+/// Auto-load every template's source `vars.toml` (if it ships one
+/// via a `[[file]]` declaration targeting `.kata/vars.toml`) into a
+/// merged seed table. Used as the lowest-priority "template-side"
+/// var source so the renderer can see seeded values on the **first**
+/// apply, before the seed has actually been written to the consumer's
+/// `.kata/vars.toml` on disk. Without this, a fresh `kata apply`
+/// against a template that uses `{{ vars.actions.checkout }}`-style
+/// references would fail with "variable not found". See
+/// yukimemi/kata#53.
+///
+/// Each template's seed is deep-merged in compose order — later
+/// templates can extend (or override) earlier ones key-by-key, the
+/// same way `[[file]]` overrides work elsewhere.
+///
+/// Only the **literal** destination `.kata/vars.toml` is recognised
+/// (no Tera evaluation of `dst` yet — we don't have a context this
+/// early). Templates that need a Tera-templated `dst` will silently
+/// skip; that's the right behaviour for now.
+fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table> {
+    const VARS_FILE_REL: &str = ".kata/vars.toml";
+    let mut seed = toml::Table::new();
+    for handle in handles {
+        for spec in &handle.manifest.files {
+            // Compute the effective dst the same way the apply loop
+            // does for literal cases. (See `render_dst` for the Tera
+            // path — we deliberately don't render here.)
+            let effective_dst: std::borrow::Cow<'_, str> = match &spec.dst {
+                Some(d) => std::borrow::Cow::Borrowed(d.as_str()),
+                None => std::borrow::Cow::Borrowed(
+                    spec.src.strip_suffix(".tera").unwrap_or(spec.src.as_str()),
+                ),
+            };
+            if effective_dst != VARS_FILE_REL {
+                continue;
+            }
+            // Same security check as the apply loop (line ~171) —
+            // refuse template-supplied paths that try to escape the
+            // template root. `collect_template_seed_vars` runs
+            // BEFORE the apply loop's check, so without this a
+            // hostile / buggy manifest could read e.g. `../../etc/passwd`
+            // via a `[[file]] src = "../etc/passwd", dst =
+            // ".kata/vars.toml"` declaration.
+            check_relative_contained(&spec.src, "template src")?;
+            let src_abs = handle.root.join(&spec.src);
+            let content = match std::fs::read_to_string(src_abs.as_std_path()) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(Error::io_at(src_abs.as_std_path(), e)),
+            };
+            let parsed: toml::Table = toml::from_str(&content)
+                .map_err(|e| Error::Config(format!("parse template seed `{src_abs}`: {e}")))?;
+            deep_merge_table(&mut seed, parsed);
+        }
+    }
+    Ok(seed)
+}
+
 /// Centralised so `apply_to_pj` and `plan_pj` cannot drift.
 fn render_or_passthrough(
     spec: &FileSpec,
