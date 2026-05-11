@@ -59,7 +59,7 @@ jiff = { version = "0.2.24", features = ["serde"] }
 inquire = "0.7"
 indicatif = "0.18.4"
 similar = "3"
-owo-colors = "4"
+owo-colors = "4.3.0"
 
 # Hashing / glob / regex
 sha2 = "0.11"
