@@ -27,7 +27,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Async runtime + concurrency
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "sync", "io-util", "time"] }
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "process", "fs", "sync", "io-util", "time"] }
 async-trait = "0.1.89"
 
 # CLI
