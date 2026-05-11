@@ -136,12 +136,61 @@ fn compute_merged(ctx: &ActionContext<'_>) -> Result<String> {
             )));
         }
         if let Some(value) = item_at_path(incoming_doc.as_item(), &segments).cloned() {
-            set_at_path(&mut existing_doc, &segments, value);
+            // If the existing file already has the same value at
+            // this path, skip the assignment entirely. toml_edit's
+            // emit after `Table::insert` / value-replace on an
+            // existing key can shuffle the entry relative to
+            // interleaved consumer keys, even when the value
+            // didn't change — kata#34. Comparing serialised forms
+            // (rather than `Item` equality) ignores attached decor
+            // (comments, blank lines, key style) and catches the
+            // pure-no-op case reliably.
+            let already_matches = item_at_path(existing_doc.as_item(), &segments)
+                .is_some_and(|cur| items_equivalent(cur, &value));
+            if !already_matches {
+                set_at_path(&mut existing_doc, &segments, value);
+            }
         }
         // path absent in incoming → leave existing untouched
     }
 
     Ok(existing_doc.to_string())
+}
+
+/// Compare two `Item`s for the kata#34 "skip if no-op" gate.
+/// `toml_edit::Item: PartialEq` is decor-aware (table headers,
+/// spans, attached comments) so plain `==` reports unequal for
+/// items that are semantically identical but parsed from differently
+/// formatted source. We want skip-on-true to be lenient: ANY
+/// reasonable definition of "same value" should suppress the
+/// position-shuffle.
+///
+/// Implementation: serialise each side as the value half of a
+/// sentinel assignment via a throwaway document and compare the
+/// canonical bytes. This drops the **key-side** decor (the comments
+/// and blank lines that lead into the `[tasks.foo]` header in the
+/// original document) but preserves any decor attached to the
+/// **value side** (e.g. a trailing `# pin` comment on the value
+/// itself), because toml_edit serialises that out. That's the
+/// intended sensitivity: if the value has an attached comment in
+/// only one of the two sides, the rendered bytes will differ in
+/// that comment, so we DO write — keeping the consumer's trailing
+/// comment intact across re-applies (kata#34's no-op skip is for
+/// the genuinely-no-change case, not for "values match but only
+/// one has a comment").
+///
+/// The cost is two clone-and-serialise round-trips per path. For
+/// the typical kata workload (≤ 30 paths × ≤ 200-line files) this
+/// is sub-millisecond. If a future merge-toml-heavy project starts
+/// noticing it, converting both sides to `toml::Value` (decor-free
+/// by construction) is the next iteration.
+fn items_equivalent(a: &Item, b: &Item) -> bool {
+    fn canon(item: &Item) -> String {
+        let mut doc = DocumentMut::new();
+        doc.as_table_mut().insert("v", item.clone());
+        doc.to_string()
+    }
+    canon(a) == canon(b)
 }
 
 /// Walk a dotted path through nested `Table` items and return the
@@ -190,7 +239,17 @@ fn set_at_path(doc: &mut DocumentMut, path: &[&str], value: Item) {
 
     if let Some(table) = current.as_table_mut() {
         let last = path.last().expect("path is non-empty");
-        table.insert(last, value);
+        // Update in place when the key already exists: `Table::insert`
+        // on an existing key may shuffle the entry's position relative
+        // to interleaved consumer keys (yukimemi/kata#34). Assigning
+        // through `get_mut` replaces the value but preserves position
+        // and surrounding decor (comments, blank lines). Falls back
+        // to `insert` only when the key is genuinely new.
+        if let Some(existing) = table.get_mut(last) {
+            *existing = value;
+        } else {
+            table.insert(last, value);
+        }
     }
 }
 
@@ -317,6 +376,57 @@ also_keep = 88
         let incoming = "[package]\nname = \"x\"\n";
         let merged = merge(None, incoming, &["package.name"]);
         assert_eq!(merged, incoming);
+    }
+
+    #[test]
+    fn merge_is_idempotent_with_interleaved_consumer_keys() {
+        // Regression for yukimemi/kata#34. Consumer-specific tasks
+        // sitting **between** kata-managed tasks must keep their
+        // position across re-applies. Before the fix, toml_edit's
+        // mid-loop `Table::insert` shuffled the interleaved keys
+        // every apply — `kata status` always reported drift even
+        // when nothing semantic changed.
+        let existing = "\
+[tasks.check]
+deps = [\"fmt-check\", \"clippy\", \"test\"]
+
+[tasks.clippy-none]
+# consumer-specific task, MUST stay between clippy and test
+desc = \"clippy with --no-default-features\"
+
+[tasks.clippy]
+args = [\"clippy\", \"--all-targets\"]
+
+[tasks.test-all]
+# another consumer task interleaved deeper in
+desc = \"run all tests\"
+
+[tasks.test]
+args = [\"test\", \"--all-targets\"]
+";
+        let incoming = "\
+[tasks.check]
+deps = [\"fmt-check\", \"clippy\", \"test\"]
+
+[tasks.clippy]
+args = [\"clippy\", \"--all-targets\", \"--\", \"-D\", \"warnings\"]
+
+[tasks.test]
+args = [\"test\", \"--all-targets\"]
+";
+        let paths = &["tasks.check", "tasks.clippy", "tasks.test"];
+        let first = merge(Some(existing), incoming, paths);
+        let second = merge(Some(&first), incoming, paths);
+        assert_eq!(
+            first, second,
+            "merge must be idempotent across re-applies — drift\n\
+             on a no-op merge is yukimemi/kata#34.\n\
+             first:\n{first}\nsecond:\n{second}",
+        );
+        // And the consumer tasks must still be present (no
+        // regression of the earlier destructive-merge fix).
+        assert!(first.contains("clippy-none"), "consumer task lost: {first}");
+        assert!(first.contains("test-all"), "consumer task lost: {first}");
     }
 
     #[test]
