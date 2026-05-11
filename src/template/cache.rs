@@ -46,8 +46,22 @@ impl TemplateCache {
     }
 
     /// Make sure the slot for `source` exists and is checked out at
-    /// `rev_spec` (default `HEAD` of the cloned default branch).
-    /// Returns `(slot path, resolved commit SHA)`.
+    /// `rev_spec` (or `origin/HEAD` — the remote's default branch
+    /// tip — when no rev is supplied). Returns `(slot path,
+    /// resolved commit SHA)`.
+    ///
+    /// When the slot is already cached, this performs `git fetch
+    /// --prune` first, then the checkout. Without that refresh, a
+    /// long-lived cache slot stays frozen at whatever SHA the most
+    /// recent operation left it at, and any upstream additions
+    /// (new preset files, new template files) are invisible — fails
+    /// downstream with a confusing "file not found" against the
+    /// cache path. See yukimemi/kata#33.
+    ///
+    /// `origin/HEAD` (the symref `git clone` sets up pointing at
+    /// the remote's default branch tip) is the default checkout
+    /// target because plain `HEAD` on a detached-HEAD cache slot
+    /// is a no-op after fetch.
     pub async fn fetch_or_clone(
         &self,
         source: &str,
@@ -71,13 +85,24 @@ impl TemplateCache {
                     .map_err(|e| Error::io_at(parent.as_std_path(), e))?;
             }
             git::clone_at(source, slot.as_path()).await?;
+        } else {
+            // Best-effort refresh so any upstream additions since
+            // the last operation against this slot become visible.
+            // Failure here is non-fatal — an offline user with a
+            // hot cache can still proceed against existing local
+            // refs. The subsequent checkout surfaces the real
+            // problem if the requested rev is missing locally.
+            if let Err(e) = git::fetch(slot.as_path()).await {
+                eprintln!("kata: warning: fetch failed for {source}: {e}; using cached refs");
+            }
         }
-        if let Some(rev) = rev_spec {
-            // `applied.toml` may carry either a symbolic rev (branch /
-            // tag) from the original spec or a resolved commit SHA
-            // from a previous apply — both are valid checkout targets.
-            git::checkout(slot.as_path(), rev).await?;
-        }
+        // `applied.toml` may carry either a symbolic rev (branch /
+        // tag) from the original spec or a resolved commit SHA from
+        // a previous apply — both are valid checkout targets. When
+        // unspecified, advance to the remote's default branch tip;
+        // see the doc comment for why `origin/HEAD` and not `HEAD`.
+        let target = rev_spec.unwrap_or("origin/HEAD");
+        git::checkout(slot.as_path(), target).await?;
         let head = git::current_head(slot.as_path()).await?;
         Ok((slot, head))
     }
