@@ -22,7 +22,6 @@ use tokio::task::JoinSet;
 use crate::applied::AppliedState;
 use crate::config::GlobalConfig;
 use crate::error::{Error, Result};
-use crate::git;
 use crate::template::{TemplateCache, source::normalise_git_url};
 
 use super::{resolve_pj_concurrency, resolve_pj_root, select_registered_projects};
@@ -158,59 +157,23 @@ async fn update_one_at(
         }
 
         let url = normalise_git_url(&tmpl.source);
-        let slot = cache.slot(&url);
 
-        // Per-template failures push a FAIL line and continue so a
-        // single broken upstream doesn't abort the whole run.
-        if !slot.join(".git").is_dir() {
-            if let Some(parent) = slot.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent.as_std_path()) {
-                    report.push(format!("FAIL {}: mkdir {parent}: {e}", tmpl.source));
-                    continue;
-                }
-            }
-            if slot.exists() {
-                let is_dir = std::fs::symlink_metadata(slot.as_std_path())
-                    .map(|m| m.is_dir())
-                    .unwrap_or(false);
-                let rm = if is_dir {
-                    std::fs::remove_dir_all(slot.as_std_path())
-                } else {
-                    std::fs::remove_file(slot.as_std_path())
-                };
-                if let Err(e) = rm {
-                    report.push(format!("FAIL {}: clean {slot}: {e}", tmpl.source));
-                    continue;
-                }
-            }
-            if let Err(e) = git::clone_at(&url, slot.as_path()).await {
-                report.push(format!("FAIL {}: clone: {e}", tmpl.source));
+        // Delegate the entire ensure-slot-at-rev dance — clone-if-
+        // missing, fetch-if-cached, checkout (rev_override or
+        // origin/HEAD), and per-URL serialisation lock (kata#35) —
+        // to `TemplateCache::fetch_or_clone`. Pre-fix this block
+        // had its own inline copy of the same logic; collapsing
+        // them eliminates a deadlock trap (a future refactor that
+        // had update.rs call `fetch_or_clone` would have acquired
+        // the same per-URL lock twice, and tokio::sync::Mutex isn't
+        // reentrant).
+        let new_sha = match cache.fetch_or_clone(&url, rev_override.as_deref()).await {
+            Ok((_, sha)) => sha,
+            Err(e) => {
+                report.push(format!("FAIL {}: {e}", tmpl.source));
                 continue;
             }
-        } else if let Err(e) = git::fetch(slot.as_path()).await {
-            report.push(format!("FAIL {}: fetch: {e}", tmpl.source));
-            continue;
-        }
-
-        // No `--rev` → follow the upstream's default branch.
-        // `HEAD` here would resolve to the **local** HEAD of the
-        // cache slot (kata clones leave the slot in detached-HEAD
-        // state, frozen at the last-applied SHA), so a plain
-        // `git fetch && git checkout HEAD` is a no-op even when
-        // origin has moved on. `origin/HEAD` is the symref
-        // `git clone` sets up pointing at the remote's default
-        // branch tip; checking it out post-fetch is what actually
-        // advances the cache.
-        let target = match rev_override {
-            Some(r) => r.clone(),
-            None => "origin/HEAD".to_string(),
         };
-        if let Err(e) = git::checkout(slot.as_path(), &target).await {
-            report.push(format!("FAIL {}: {e}", tmpl.source));
-            continue;
-        }
-
-        let new_sha = git::current_head(slot.as_path()).await?;
         let old_sha = tmpl.rev.clone();
         if new_sha == old_sha {
             report.push(format!(
