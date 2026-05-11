@@ -193,6 +193,88 @@ source = "{template_url}"
 }
 
 #[test]
+fn init_refreshes_preset_cache_when_upstream_added_new_preset() {
+    // Regression: yukimemi/kata#33. After a first `kata init` populates
+    // the preset cache slot at SHA X, if upstream adds a new preset file
+    // and a second `kata init` (in a different PJ) asks for it, kata
+    // must `git fetch` + `git checkout origin/HEAD` on the cached slot
+    // — otherwise the slot stays frozen at SHA X (kata clones leave the
+    // slot in detached-HEAD state) and the new preset file is invisible,
+    // failing with "file not found".
+    let td = TempDir::new().unwrap();
+    let upstream = td.path().join("preset-repo");
+    git_init_repo(&upstream);
+
+    // A minimal template the preset(s) will reference.
+    write(
+        &upstream.join("pj-base/template.toml"),
+        r#"
+name = "pj-base"
+[[file]]
+src = "LICENSE"
+how = "overwrite"
+when = "once"
+"#,
+    );
+    write(&upstream.join("pj-base/LICENSE"), "MIT — sample\n");
+    // First preset only — `bar.toml` will be added after the first init.
+    write(
+        &upstream.join("foo.toml"),
+        r#"
+name = "foo"
+[[templates]]
+source = "./pj-base"
+"#,
+    );
+    git_in(&upstream, &["add", "-A"]);
+    git_in(&upstream, &["commit", "-q", "-m", "preset foo"]);
+
+    let upstream_url = file_url(&upstream);
+
+    // First init — caches the preset slot at the SHA where only foo exists.
+    let pj_a = td.path().join("pj-a");
+    kata(td.path())
+        .args(["init"])
+        .arg(format!("{upstream_url}:foo"))
+        .args(["--at"])
+        .arg(&pj_a)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // Upstream gains a new preset.
+    write(
+        &upstream.join("bar.toml"),
+        r#"
+name = "bar"
+[[templates]]
+source = "./pj-base"
+"#,
+    );
+    git_in(&upstream, &["add", "-A"]);
+    git_in(&upstream, &["commit", "-q", "-m", "preset bar"]);
+
+    // Second init against the *new* preset. Before #33's fix this fails
+    // with "file not found" pointing at the cached `bar.toml` path that
+    // doesn't exist in the frozen slot.
+    let pj_b = td.path().join("pj-b");
+    kata(td.path())
+        .args(["init"])
+        .arg(format!("{upstream_url}:bar"))
+        .args(["--at"])
+        .arg(&pj_b)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    let license = std::fs::read_to_string(pj_b.join("LICENSE")).unwrap();
+    assert!(
+        license.contains("MIT — sample"),
+        "second init should have applied the template referenced by the new preset: {license}"
+    );
+}
+
+#[test]
 fn init_remote_preset_no_longer_errors_with_phase_1_message() {
     // Smoke: the old "Phase 1 supports local presets only" error
     // is gone — a remote preset that simply doesn't resolve
