@@ -1,24 +1,20 @@
 preset = "github.com/yukimemi/pj-presets:rust-cli"
-applied_at = "2026-05-10T23:48:30.7657994Z"
+applied_at = "2026-05-11T23:33:15.187416Z"
 
 [[templates]]
 source = "github.com/yukimemi/pj-base"
-rev = "e86efe88c5769d31a34d07c84a67b0dd869e094d"
-version = "0.6.1"
+rev = "c9d03e3bc2a50c526276c1902f8146140af90c71"
+version = "0.7.0"
 
 [[templates]]
 source = "github.com/yukimemi/pj-rust"
-rev = "29bdb14f7e4ba0060c8af90ee55035fe4ae8c6ee"
-version = "0.3.2"
+rev = "53e800e32456697fee3a3a28c028bc5fbab62e15"
+version = "0.4.0"
 
 [[templates]]
 source = "github.com/yukimemi/pj-rust-cli"
-rev = "383b0ee5ce5907f36b066d44d435d6c50b6b30fb"
+rev = "9263751c3f94f3415147e546db33170157fb1503"
 version = "0.2.0"
-
-[vars.actions]
-checkout = "v6"
-swatinem_rust_cache = "v2"
 
 [files.".agents/skills/renri/SKILL.md"]
 once_applied = true
@@ -79,7 +75,7 @@ content_hash = "89dbb3b4fd63c479f61f077d2383ab5c0998ea838f271ed57fd09281975deda0
 content_hash = "2ada1cf4347db9e98fadd67ca72cd9e29042c5bf6ab719d666b5d71f97663e81"
 
 [files."renovate.json"]
-content_hash = "927f2daf0222cadaca063953c39aa2065b314dae244b610e7c1a63e4eb332256"
+once_applied = true
 
 [files."renri.toml"]
 content_hash = "f4751570494ba62997cfb47e3abee2e707d3e01d924d1e8b940905a4e7c974f3"
