@@ -16,12 +16,11 @@
   "customManagers": [
     {
       "customType": "regex",
-      "fileMatch": ["^\\.github/workflows/.+\\.template$"],
+      "fileMatch": ["^vars\\.toml$", "^\\.kata/vars\\.toml$"],
       "matchStrings": [
-        "uses:\\s*[\"']?(?<depName>[\\w./-]+)@(?<currentValue>[\\w./-]+)[\"']?"
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s*\\n[^=\\n]+=\\s*\"(?<currentValue>[^\"]+)\""
       ],
-      "datasourceTemplate": "github-tags",
-      "description": "Pick up `uses:` action references inside .template workflow files (kata sources). Renovate's default github-actions manager only scans .yml/.yaml; .template is here so the source isn't auto-executed by GitHub Actions. Optional `[\"']?` wrappers around depName + currentValue accept bare, single-quoted, and double-quoted forms — all three are valid YAML for `uses:`."
+      "description": "Pick up action version pins inside `vars.toml` (template-side, this repo's root) and `.kata/vars.toml` (consumer-side, after kata seeds it). Each pin is preceded by a `# renovate: datasource=... depName=...` annotation; the regex captures both plus the value on the next non-comment line. The matching version pins drive `{{ vars.actions.* }}` references in `*.yml.tera` workflow templates."
     }
   ],
   "packageRules": [

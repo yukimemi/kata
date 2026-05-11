@@ -3,18 +3,6 @@
 **/*.rs.bk
 Cargo.lock.bak
 
-# kata's own state — track the canonical applied.toml so
-# `kata apply` is reproducible from a fresh clone, but keep the rest
-# of `.kata/` (future local-only side-files like `applied.local.toml`,
-# AI transcripts, etc.) out of the repo.
-/.kata/
-!/.kata/applied.toml
-
-# APM compiled outputs (committed for visibility once apm.yml exists)
-# Uncomment if we change strategy:
-# /.claude/skills/
-# /.gemini/skills/
-# /.github/skills/
 # kata:gitignore:base:begin
 # Editor / OS noise — kata-managed (yukimemi/pj-base).
 .idea/
@@ -23,7 +11,10 @@ Cargo.lock.bak
 *~
 .DS_Store
 Thumbs.db
-# kata:gitignore:base:end
 
-# APM dependencies
+# APM dependencies — install output of apm.yml's deps.
+# Skill files under .agents/, .claude/, .gemini/ etc. are
+# committed (kata seeds them; renri post_create refreshes via
+# `apm install --update`); the apm_modules/ source cache is not.
 apm_modules/
+# kata:gitignore:base:end
