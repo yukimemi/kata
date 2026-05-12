@@ -207,6 +207,26 @@ pub async fn apply_to_pj(
     // merge-toml), defeating composition. See #85.
     let mut wrote_in_run: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Disk content per dst at the start of this apply, captured the
+    // first time we touch that dst. Used by the post-loop net-delta
+    // pass (#81): when multiple `when="always"` entries target the
+    // same dst (e.g. overwrite-then-merge-toml on `renri.toml`), each
+    // layer writes intermediate bytes and individually reports
+    // `wrote`, but if the composed final disk content equals the
+    // initial content the user-visible diff is zero — both layers
+    // should then report `unchanged`. `None` means "not on disk at
+    // start"; `Some(_)` means we read this content before any layer
+    // wrote in this run.
+    let mut initial_disk_by_dst: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    // Indices into `actions` per dst, populated alongside each
+    // `actions.push((dst_rel, outcome.kind))`. The post-loop pass
+    // walks groups of size >= 2 (single-entry dsts trust their own
+    // mode's report) and rewrites `Wrote` to `Unchanged` when the
+    // group's net delta is zero. See #81.
+    let mut action_indices_by_dst: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+
     for handle in &handles {
         applied_templates.push(AppliedTemplate {
             source: handle.source_spec.clone(),
@@ -228,6 +248,28 @@ pub async fn apply_to_pj(
 
             let state_key = dst_rel.clone();
 
+            // Snapshot disk state on first encounter with this dst —
+            // before any layer can have written to it in this run.
+            // Drives the post-loop net-delta pass (#81). Safe to read
+            // even for dry-run; the post-loop pass just skips itself
+            // there.
+            //
+            // `is_file()` guard: if the dst is a directory (or any
+            // non-regular special file), `read_existing_text` would
+            // surface a generic I/O error before the per-entry once
+            // path can emit its more helpful "destination exists but
+            // is not a regular file" message. Treat non-files as
+            // "no snapshot, no collapse" and let downstream handling
+            // produce the dedicated error.
+            if !initial_disk_by_dst.contains_key(&state_key) {
+                let initial = if dst_abs.is_file() {
+                    read_existing_text(dst_abs.as_path())?
+                } else {
+                    None
+                };
+                initial_disk_by_dst.insert(state_key.clone(), initial);
+            }
+
             // when = "once" gating. `--reseed <path>` bypasses the
             // whole once-gate block (skip-when-applied, adoption,
             // non-regular refusal) so the explicit intent of
@@ -235,10 +277,16 @@ pub async fn apply_to_pj(
             // for this path" is honoured. The post-loop pass still
             // re-stamps `once_applied = true` because the entry's
             // mode runs and lands in `once_applied_dsts`. See #82.
-            if spec.when == WhenMode::Once && !opts.force_once && !opts.reseed.contains(&state_key)
+            if spec.when == WhenMode::Once
+                && !opts.force_once
+                && !opts.reseed.contains(&state_key)
             {
                 if let Some(state) = applied.files.get(&state_key) {
                     if state.once_applied {
+                        action_indices_by_dst
+                            .entry(state_key.clone())
+                            .or_default()
+                            .push(actions.len());
                         actions.push((dst_rel, OutcomeKind::Skipped));
                         continue;
                     }
@@ -272,6 +320,10 @@ pub async fn apply_to_pj(
                         once_applied_dsts.insert(state_key.clone());
                         wrote_in_run.insert(state_key.clone());
                     }
+                    action_indices_by_dst
+                        .entry(state_key.clone())
+                        .or_default()
+                        .push(actions.len());
                     actions.push((dst_rel, OutcomeKind::Adopted));
                     continue;
                 }
@@ -285,6 +337,10 @@ pub async fn apply_to_pj(
                 if dst_abs.exists() && !wrote_in_run.contains(&state_key) {
                     let msg = format!("destination exists but is not a regular file: {dst_abs}");
                     errors.push((dst_rel.clone(), msg));
+                    action_indices_by_dst
+                        .entry(state_key.clone())
+                        .or_default()
+                        .push(actions.len());
                     actions.push((dst_rel, OutcomeKind::Failed));
                     continue;
                 }
@@ -292,6 +348,10 @@ pub async fn apply_to_pj(
             // when = "manual" is never auto-applied here — Phase 1
             // doesn't expose --file targeting yet.
             if spec.when == WhenMode::Manual {
+                action_indices_by_dst
+                    .entry(state_key.clone())
+                    .or_default()
+                    .push(actions.len());
                 actions.push((dst_rel, OutcomeKind::Skipped));
                 continue;
             }
@@ -299,6 +359,10 @@ pub async fn apply_to_pj(
             // when_expr predicate
             if let Some(expr) = &spec.when_expr {
                 if !eval_truthy(&mut renderer, expr, &ctx)? {
+                    action_indices_by_dst
+                        .entry(state_key.clone())
+                        .or_default()
+                        .push(actions.len());
                     actions.push((dst_rel, OutcomeKind::Skipped));
                     continue;
                 }
@@ -309,6 +373,10 @@ pub async fn apply_to_pj(
                 Ok(s) => s,
                 Err(e) => {
                     errors.push((dst_rel.clone(), format!("read source: {e}")));
+                    action_indices_by_dst
+                        .entry(state_key.clone())
+                        .or_default()
+                        .push(actions.len());
                     actions.push((dst_rel, OutcomeKind::Failed));
                     continue;
                 }
@@ -341,6 +409,10 @@ pub async fn apply_to_pj(
                 Ok(o) => o,
                 Err(e) => {
                     errors.push((dst_rel.clone(), e.to_string()));
+                    action_indices_by_dst
+                        .entry(state_key.clone())
+                        .or_default()
+                        .push(actions.len());
                     actions.push((dst_rel, OutcomeKind::Failed));
                     continue;
                 }
@@ -402,6 +474,10 @@ pub async fn apply_to_pj(
                 }
             }
 
+            action_indices_by_dst
+                .entry(state_key.clone())
+                .or_default()
+                .push(actions.len());
             actions.push((dst_rel, outcome.kind));
             // Drop: ActionContext borrowed `handle` and `spec`.
         }
@@ -419,6 +495,74 @@ pub async fn apply_to_pj(
             fs.once_applied = true;
             applied.record(dst, fs);
         }
+    }
+
+    // 6b. Post-loop: collapse `Wrote` to `Unchanged` for dsts whose
+    //     net delta across all layered entries is zero (#81). Each
+    //     `when="always"` layer reports `Wrote` independently when
+    //     its own byte-compare differs (overwrite clobbers the
+    //     merged disk content; the next layer's merge-toml then
+    //     restores it), but the user-visible effect is no change.
+    //     Reading the dst once more here is cheap and avoids
+    //     restructuring the per-mode `execute` contract.
+    //
+    //     Only runs for dsts with multiple `[[file]]` entries —
+    //     single-entry dsts already report accurately from their
+    //     mode's own byte-compare. Skipped under `--dry-run`
+    //     because no layer actually wrote, and the per-mode plan
+    //     already reflects the net-vs-disk comparison.
+    if !opts.dry_run {
+        for (dst_key, indices) in &action_indices_by_dst {
+            if indices.len() < 2 {
+                continue;
+            }
+            // Nothing to collapse if none of the entries actually
+            // wrote — skip the disk re-read entirely. Common case
+            // when both layers reported `Unchanged` already.
+            let has_wrote = indices.iter().any(|&i| {
+                actions
+                    .get(i)
+                    .is_some_and(|(_, k)| matches!(k, OutcomeKind::Wrote))
+            });
+            if !has_wrote {
+                continue;
+            }
+            let dst_abs = pj_root.join(dst_key);
+            // `is_file()` guard so a dst that ended up as a directory
+            // (impossible via kata's own write path but cheap defence)
+            // surfaces as "no final snapshot" rather than a generic
+            // I/O error.
+            let final_disk = if dst_abs.is_file() {
+                read_existing_text(dst_abs.as_path())?
+            } else {
+                None
+            };
+            let initial = initial_disk_by_dst
+                .get(dst_key)
+                .cloned()
+                .unwrap_or_default();
+            if initial == final_disk {
+                for &i in indices {
+                    if let Some(slot) = actions.get_mut(i) {
+                        if matches!(slot.1, OutcomeKind::Wrote) {
+                            slot.1 = OutcomeKind::Unchanged;
+                        }
+                    }
+                }
+                // If every `Wrote` for this dst collapsed away, the
+                // `applied_at` bookkeeping should also reflect "no
+                // real write happened to this dst". `has_any_write`
+                // stays true if any OTHER dst genuinely wrote; we
+                // only need to clear it when this collapse removed
+                // the last `Wrote` from the run. Cheaper to just
+                // re-derive from the post-collapse actions.
+            }
+        }
+        // Re-derive has_any_write so an all-collapsed run doesn't
+        // bump `applied_at`. After collapse some `Wrote`s may have
+        // become `Unchanged` — the final stamp should reflect the
+        // observable-disk-write truth, not the pre-collapse intent.
+        has_any_write = actions.iter().any(|(_, k)| matches!(k, OutcomeKind::Wrote));
     }
 
     // 7. Write back applied.toml on success (even partial — see
@@ -654,29 +798,47 @@ pub async fn plan_pj(
 /// early). Templates that need a Tera-templated `dst` will silently
 /// skip; that's the right behaviour for now.
 fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table> {
-    const VARS_FILE_REL: &str = ".kata/vars.toml";
     let mut seed = toml::Table::new();
+    // Each layer ships its own `vars.toml` (#86: also `vars.<layer>.toml`).
+    // We pull every `[[file]]` whose dst lands inside `.kata/` and
+    // matches the vars-file naming rule (`vars.toml` or
+    // `vars.<name>.toml`). Layered seeds compose across templates in
+    // compose order, and within one template every `vars.<X>.toml`
+    // alphabetically followed by `vars.toml` last — same
+    // ordering rule the consumer-side `load_vars_file` uses
+    // (see `VarSources::load_vars_file` doc).
     for handle in handles {
-        for spec in &handle.manifest.files {
-            // Compute the effective dst the same way the apply loop
-            // does for literal cases. (See `render_dst` for the Tera
-            // path — we deliberately don't render here.)
-            let effective_dst: std::borrow::Cow<'_, str> = match &spec.dst {
-                Some(d) => std::borrow::Cow::Borrowed(d.as_str()),
-                None => std::borrow::Cow::Borrowed(
-                    spec.src.strip_suffix(".tera").unwrap_or(spec.src.as_str()),
-                ),
-            };
-            if effective_dst != VARS_FILE_REL {
-                continue;
+        let mut layer_specs: Vec<&crate::manifest::FileSpec> = handle
+            .manifest
+            .files
+            .iter()
+            .filter(|spec| spec_is_vars_seed(spec))
+            .collect();
+        // `vars.toml` goes last so its deep-merge wins on a
+        // leaf-key conflict regardless of layer-name first letter.
+        // Plain `sort_by_key` on the path can't enforce this on
+        // its own (e.g. `vars.web.toml` would lex-sort after
+        // `vars.toml`). See #93.
+        layer_specs.sort_by(|a, b| {
+            let dst_a = a.dst_or_src();
+            let dst_b = b.dst_or_src();
+            let is_bare_a = dst_a.ends_with("/vars.toml") || dst_a == "vars.toml";
+            let is_bare_b = dst_b.ends_with("/vars.toml") || dst_b == "vars.toml";
+            match (is_bare_a, is_bare_b) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => dst_a.cmp(dst_b),
             }
-            // Same security check as the apply loop (line ~171) —
-            // refuse template-supplied paths that try to escape the
+        });
+        for spec in layer_specs {
+            // Same security check as the apply loop — refuse
+            // template-supplied paths that try to escape the
             // template root. `collect_template_seed_vars` runs
             // BEFORE the apply loop's check, so without this a
-            // hostile / buggy manifest could read e.g. `../../etc/passwd`
-            // via a `[[file]] src = "../etc/passwd", dst =
-            // ".kata/vars.toml"` declaration.
+            // hostile / buggy manifest could read e.g.
+            // `../../etc/passwd` via a `[[file]] src =
+            // "../etc/passwd", dst = ".kata/vars.toml"` declaration.
             check_relative_contained(&spec.src, "template src")?;
             let src_abs = handle.root.join(&spec.src);
             let content = match std::fs::read_to_string(src_abs.as_std_path()) {
@@ -690,6 +852,71 @@ fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table>
         }
     }
     Ok(seed)
+}
+
+/// True when a file-spec ships an entry that lands inside `.kata/`
+/// with a name matching the vars-file pattern. Used by
+/// [`collect_template_seed_vars`] to pull every per-layer seed.
+/// Reuses `FileSpec::dst_or_src()` so the effective-dst logic
+/// stays in one place (no parallel implementation to drift).
+///
+/// The dst string is normalised before the prefix check so that
+/// `./.kata/vars.toml` or `foo/../.kata/vars.web.toml` are
+/// recognised as vars seeds — both forms resolve into `.kata/`
+/// at apply time anyway, and treating them inconsistently here
+/// would make first-run template seeding differ from
+/// subsequent runs (when kata reads the written file from disk).
+/// See PR #93 review.
+fn spec_is_vars_seed(spec: &crate::manifest::FileSpec) -> bool {
+    use crate::render::vars::{KATA_DIR_REL, matches_vars_pattern};
+    let normalized = normalize_relative_path(spec.dst_or_src());
+    let prefix = format!("{KATA_DIR_REL}/");
+    let Some(name) = normalized.strip_prefix(prefix.as_str()) else {
+        return false;
+    };
+    // Reject any further sub-directory under `.kata/` (e.g.
+    // `.kata/sub/vars.toml`) — kata's bookkeeping lives flat.
+    if name.contains('/') {
+        return false;
+    }
+    matches_vars_pattern(name)
+}
+
+/// Collapse `.` / `..` components in a relative path without
+/// touching the filesystem. Mixed `/` and `\` separators both
+/// fold into `/` for the comparison, so a template author can
+/// write the dst in either convention.
+///
+/// Returns an empty string if the path tries to escape the root
+/// (more `..` than non-`..` components). `spec_is_vars_seed` then
+/// drops the entry because the empty string won't `strip_prefix(".kata/")`.
+fn normalize_relative_path(s: &str) -> String {
+    use std::path::{Component, Path, PathBuf};
+    let unified: String = s.chars().map(|c| if c == '\\' { '/' } else { c }).collect();
+    let mut buf = PathBuf::new();
+    for c in Path::new(&unified).components() {
+        match c {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                if !buf.pop() {
+                    // Escapes the root — caller's `strip_prefix(".kata/")`
+                    // will fail, which is the right behaviour for
+                    // `../etc/passwd`-style attempts.
+                    return String::new();
+                }
+            }
+            Component::Normal(seg) => buf.push(seg),
+            Component::RootDir | Component::Prefix(_) => {
+                // Absolute paths are rejected by the apply loop
+                // anyway (`check_relative_contained`); returning
+                // empty here means `spec_is_vars_seed` returns
+                // false rather than matching against the unsafe
+                // input.
+                return String::new();
+            }
+        }
+    }
+    buf.to_string_lossy().replace('\\', "/")
 }
 
 /// Centralised so `apply_to_pj` and `plan_pj` cannot drift.

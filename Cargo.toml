@@ -41,6 +41,10 @@ tera = "1.20.1"
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
+# `preserve_order` keeps insertion order across deserialize → mutate →
+# serialize, so merge-json (#71) leaf-replacements don't shuffle
+# the consumer's interleaved keys. Pulls in indexmap transitively.
+serde_json = { version = "1.0.145", features = ["preserve_order"] }
 toml = "1.1.2"
 toml_edit = "0.23"
 
@@ -64,6 +68,9 @@ owo-colors = "4.3.0"
 # Hashing / glob / regex
 sha2 = "0.11"
 globset = "0.4.18"
+# Used by merge-toml / merge-yaml `paths` entries written in rvpm
+# `//.../` regex form; see #62.
+regex = "1.12.3"
 
 # Logging
 tracing = "0.1.44"
