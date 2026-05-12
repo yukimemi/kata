@@ -44,7 +44,7 @@ serde_yaml = "0.9.34"
 # `preserve_order` keeps insertion order across deserialize → mutate →
 # serialize, so merge-json (#71) leaf-replacements don't shuffle
 # the consumer's interleaved keys. Pulls in indexmap transitively.
-serde_json = { version = "1.0.145", features = ["preserve_order"] }
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
 toml = "1.1.2"
 toml_edit = "0.23"
 
