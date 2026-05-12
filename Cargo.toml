@@ -41,7 +41,7 @@ tera = "1.20.1"
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
-toml = "1"
+toml = "1.1.2"
 toml_edit = "0.23"
 
 # Errors
