@@ -1206,3 +1206,170 @@ fn once_flag_composes_across_multiple_entries_to_same_dst() {
         "Renovate-style bump must survive second apply: {after}"
     );
 }
+
+#[test]
+fn reseed_flag_re_emits_once_file_and_restamps_once_applied() {
+    // Issue #82: `kata apply --reseed <path>` must clear the
+    // `once_applied = true` flag for the named dst in-memory so the
+    // matching `when = "once"` entry fires once more; after the run
+    // the flag is re-set, so the final `applied.toml` looks
+    // identical to a fresh apply.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "renovate.json.seed"
+            dst = "renovate.json"
+            how = "overwrite"
+            when = "once"
+            "#,
+        )
+        .file(
+            "renovate.json.seed",
+            "{\n  \"extends\": [\"github>yukimemi/renovate-config\"]\n}\n",
+        );
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // Consumer edits the seed (simulating drift / hand-merge).
+    let edit = "{\n  \"extends\": [\"local:renovate-config\"]\n}\n";
+    write(&pj.join("renovate.json"), edit);
+
+    // Plain apply: once gate keeps the consumer edit.
+    kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+    let after_plain = std::fs::read_to_string(pj.join("renovate.json")).unwrap();
+    assert!(
+        after_plain.contains("local:renovate-config"),
+        "plain apply must NOT touch a once-applied file: {after_plain}"
+    );
+
+    // --reseed: the once gate flips off in-memory, the template
+    // seed is re-emitted, and the flag is re-set at the end of
+    // the run.
+    kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .args(["--non-interactive", "--reseed", "renovate.json"])
+        .assert()
+        .success();
+    let after_reseed = std::fs::read_to_string(pj.join("renovate.json")).unwrap();
+    assert!(
+        after_reseed.contains("github>yukimemi/renovate-config"),
+        "--reseed must re-emit the template seed: {after_reseed}"
+    );
+
+    // applied.toml should still record once_applied = true after the
+    // reseed run (post-loop stamping restores it).
+    let applied: toml::Table =
+        toml::from_str(&std::fs::read_to_string(pj.join(".kata/applied.toml")).unwrap()).unwrap();
+    let st = applied["files"]
+        .as_table()
+        .unwrap()
+        .get("renovate.json")
+        .expect("renovate.json missing from applied.toml")
+        .as_table()
+        .unwrap();
+    assert_eq!(
+        st.get("once_applied").and_then(|v| v.as_bool()),
+        Some(true),
+        "once_applied must be re-stamped after --reseed apply"
+    );
+
+    // Subsequent plain apply: gate is back in force, consumer can
+    // re-edit and it survives.
+    write(&pj.join("renovate.json"), edit);
+    kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+    let after_second = std::fs::read_to_string(pj.join("renovate.json")).unwrap();
+    assert!(
+        after_second.contains("local:renovate-config"),
+        "post-reseed plain apply must once-gate again: {after_second}"
+    );
+}
+
+#[test]
+fn reseed_unknown_path_is_silent_noop() {
+    // Issue #82: `--reseed <path>` for a path that isn't in any
+    // matched manifest must silently no-op (so the same flag set
+    // can be sprayed across heterogeneous PJs under `--all`).
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "src/main.rs"
+            how = "overwrite"
+            when = "once"
+            "#,
+        )
+        .file("src/main.rs", "fn main() { /* template */ }\n");
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+    write(&pj.join("src/main.rs"), "fn main() { /* user */ }\n");
+
+    // `apm.yml` isn't declared by any manifest above.
+    kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .args(["--non-interactive", "--reseed", "apm.yml"])
+        .assert()
+        .success();
+
+    let body = std::fs::read_to_string(pj.join("src/main.rs")).unwrap();
+    assert!(
+        body.contains("/* user */"),
+        "unrelated --reseed path must not disturb other once files: {body}"
+    );
+}

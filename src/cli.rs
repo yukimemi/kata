@@ -184,6 +184,16 @@ pub enum Command {
         /// Ignored without `--all`.
         #[arg(long = "pj-concurrency", value_name = "N", requires = "all")]
         pj_concurrency: Option<usize>,
+        /// Re-emit a `when = "once"` file by clearing its
+        /// `once_applied = true` flag for this run only (it's
+        /// re-set at the end of the run, leaving final state the
+        /// same as a fresh apply).
+        /// Repeatable: `--reseed renovate.json --reseed apm.yml`.
+        /// Under `--all`, the path is applied to every matched PJ;
+        /// a path not declared by a PJ's manifest is a silent no-op
+        /// for that PJ.
+        #[arg(long = "reseed", value_name = "PATH")]
+        reseed: Vec<String>,
     },
 
     /// Show what would change if `apply` were to run. Without
@@ -392,6 +402,7 @@ impl Cli {
                 all,
                 tags,
                 pj_concurrency,
+                reseed,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
                 if all {
@@ -408,6 +419,7 @@ impl Cli {
                         pj_concurrency,
                         interactive,
                         no_color,
+                        reseed,
                     )
                     .await
                 } else {
@@ -423,6 +435,7 @@ impl Cli {
                         ai_concurrency,
                         interactive,
                         no_color,
+                        reseed,
                     )
                     .await
                 }

@@ -63,6 +63,15 @@ pub struct PjApplyOptions {
     /// run via `--ai-concurrency <N>`. Capped to >= 1 so a 0
     /// from a hand-edited config doesn't deadlock the apply.
     pub ai_concurrency: usize,
+    /// `--reseed <PATH>` (repeatable): clear the `once_applied`
+    /// flag on these dst paths in-memory at the start of this
+    /// apply, so any matching `when = "once"` entries re-emit
+    /// their seed content. The flag is re-set at the end of the
+    /// run, leaving final `applied.toml` identical to a fresh
+    /// apply. Paths not declared in any active manifest are a
+    /// silent no-op for that PJ (so the same flag set can be
+    /// sprayed across heterogeneous PJs under `--all`). See #82.
+    pub reseed: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -94,6 +103,31 @@ pub async fn apply_to_pj(
     agent: Option<Arc<dyn AiAgent>>,
 ) -> Result<PjApplyResult> {
     let mut applied = AppliedState::load(&pj_root)?;
+
+    // `--reseed <PATH>` (#82): clear `once_applied = true` on the
+    // named dsts in the in-memory copy of `applied` so any matching
+    // `when = "once"` entries fall through their gate and re-emit
+    // their seed content. The flag is re-set by the post-loop
+    // `once_applied = true` stamping pass, so the final
+    // `applied.toml` recorded on disk looks identical to a fresh
+    // apply. Paths absent from `applied.files` (e.g. when the PJ's
+    // manifest set doesn't ship that file) are a silent no-op so
+    // the same `--reseed` set can be sprayed across heterogeneous
+    // PJs under `--all`.
+    //
+    // Two reseed effects, separately implemented below:
+    //   1. flip `once_applied` to false on `applied.files` so the
+    //      once-skip branch falls through (here, in-memory only);
+    //   2. bypass the adoption flow ("file exists on disk → adopt")
+    //      so the entry's mode actually runs and rewrites disk
+    //      with the template seed (the `reseed_set` membership
+    //      check inside the per-entry loop).
+    for path in &opts.reseed {
+        if let Some(state) = applied.files.get_mut(path) {
+            state.once_applied = false;
+        }
+    }
+    let reseed_set: std::collections::HashSet<String> = opts.reseed.iter().cloned().collect();
 
     // Global AI gate. We always create one so `ActionContext` can
     // borrow it unconditionally; the cap is `opts.ai_concurrency`
@@ -194,8 +228,15 @@ pub async fn apply_to_pj(
 
             let state_key = dst_rel.clone();
 
-            // when = "once" gating
-            if spec.when == WhenMode::Once && !opts.force_once {
+            // when = "once" gating. `--reseed <path>` bypasses the
+            // whole once-gate block (skip-when-applied, adoption,
+            // non-regular refusal) so the explicit intent of
+            // "re-emit the template seed over whatever's on disk
+            // for this path" is honoured. The post-loop pass still
+            // re-stamps `once_applied = true` because the entry's
+            // mode runs and lands in `once_applied_dsts`. See #82.
+            let is_reseed = reseed_set.contains(&state_key);
+            if spec.when == WhenMode::Once && !opts.force_once && !is_reseed {
                 if let Some(state) = applied.files.get(&state_key) {
                     if state.once_applied {
                         actions.push((dst_rel, OutcomeKind::Skipped));
