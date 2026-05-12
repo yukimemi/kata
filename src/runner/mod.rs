@@ -674,11 +674,19 @@ fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table>
 /// [`collect_template_seed_vars`] to pull every per-layer seed.
 /// Reuses `FileSpec::dst_or_src()` so the effective-dst logic
 /// stays in one place (no parallel implementation to drift).
+///
+/// The dst string is normalised before the prefix check so that
+/// `./.kata/vars.toml` or `foo/../.kata/vars.web.toml` are
+/// recognised as vars seeds — both forms resolve into `.kata/`
+/// at apply time anyway, and treating them inconsistently here
+/// would make first-run template seeding differ from
+/// subsequent runs (when kata reads the written file from disk).
+/// See PR #93 review.
 fn spec_is_vars_seed(spec: &crate::manifest::FileSpec) -> bool {
     use crate::render::vars::{KATA_DIR_REL, matches_vars_pattern};
-    let dst = spec.dst_or_src();
+    let normalized = normalize_relative_path(spec.dst_or_src());
     let prefix = format!("{KATA_DIR_REL}/");
-    let Some(name) = dst.strip_prefix(prefix.as_str()) else {
+    let Some(name) = normalized.strip_prefix(prefix.as_str()) else {
         return false;
     };
     // Reject any further sub-directory under `.kata/` (e.g.
@@ -687,6 +695,43 @@ fn spec_is_vars_seed(spec: &crate::manifest::FileSpec) -> bool {
         return false;
     }
     matches_vars_pattern(name)
+}
+
+/// Collapse `.` / `..` components in a relative path without
+/// touching the filesystem. Mixed `/` and `\` separators both
+/// fold into `/` for the comparison, so a template author can
+/// write the dst in either convention.
+///
+/// Returns an empty string if the path tries to escape the root
+/// (more `..` than non-`..` components). `spec_is_vars_seed` then
+/// drops the entry because the empty string won't `strip_prefix(".kata/")`.
+fn normalize_relative_path(s: &str) -> String {
+    use std::path::{Component, Path, PathBuf};
+    let unified: String = s.chars().map(|c| if c == '\\' { '/' } else { c }).collect();
+    let mut buf = PathBuf::new();
+    for c in Path::new(&unified).components() {
+        match c {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                if !buf.pop() {
+                    // Escapes the root — caller's `strip_prefix(".kata/")`
+                    // will fail, which is the right behaviour for
+                    // `../etc/passwd`-style attempts.
+                    return String::new();
+                }
+            }
+            Component::Normal(seg) => buf.push(seg),
+            Component::RootDir | Component::Prefix(_) => {
+                // Absolute paths are rejected by the apply loop
+                // anyway (`check_relative_contained`); returning
+                // empty here means `spec_is_vars_seed` returns
+                // false rather than matching against the unsafe
+                // input.
+                return String::new();
+            }
+        }
+    }
+    buf.to_string_lossy().replace('\\', "/")
 }
 
 /// Centralised so `apply_to_pj` and `plan_pj` cannot drift.
