@@ -16,5 +16,6 @@ pub mod render;
 pub mod runner;
 pub mod template;
 pub mod ui;
+pub mod vcs;
 
 pub use error::{Error, Result};

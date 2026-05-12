@@ -184,6 +184,16 @@ pub enum Command {
         /// Ignored without `--all`.
         #[arg(long = "pj-concurrency", value_name = "N", requires = "all")]
         pj_concurrency: Option<usize>,
+        /// Proceed even when registered PJs have uncommitted work.
+        /// Default behaviour (without this flag) under `--all` is
+        /// to print the dirty PJs and abort so kata-driven changes
+        /// don't get mixed with consumer WIP. See #80.
+        #[arg(long = "allow-dirty", requires = "all", conflicts_with = "skip_dirty")]
+        allow_dirty: bool,
+        /// Silently skip dirty PJs and apply only to clean ones.
+        /// Mutually exclusive with `--allow-dirty`. Requires `--all`.
+        #[arg(long = "skip-dirty", requires = "all")]
+        skip_dirty: bool,
         /// Re-emit a `when = "once"` file by clearing its
         /// `once_applied = true` flag for this run only (it's
         /// re-set at the end of the run, leaving final state the
@@ -402,6 +412,8 @@ impl Cli {
                 all,
                 tags,
                 pj_concurrency,
+                allow_dirty,
+                skip_dirty,
                 reseed,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
@@ -419,6 +431,8 @@ impl Cli {
                         pj_concurrency,
                         interactive,
                         no_color,
+                        allow_dirty,
+                        skip_dirty,
                         reseed,
                     )
                     .await
