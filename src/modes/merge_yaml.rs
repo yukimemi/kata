@@ -37,7 +37,7 @@ use serde_yaml::{Mapping, Value};
 
 use crate::error::{Error, Result};
 
-use super::merge_path::{PathSpec, parse_path_spec};
+use super::merge_path::{PathSpec, parse_path_spec, shallowest_matches};
 use super::{
     ActionContext, ActionOutcome, ActionPlan, ApplyMode, OutcomeKind, PlanKind, unified_diff,
 };
@@ -139,10 +139,12 @@ fn compute_merged(ctx: &ActionContext<'_>) -> Result<String> {
                     collect_dotted_paths(&incoming_val, "", &mut out);
                     out
                 });
-                for p in collected.iter() {
-                    if re.is_match(p) {
-                        copy_one_path(&mut existing_val, &incoming_val, p)?;
-                    }
+                // Drop child paths when an ancestor also matches —
+                // see `shallowest_matches` doc. Avoids redundant
+                // tree walks on broad regexes like `//.+//`.
+                let to_copy = shallowest_matches(collected, &re);
+                for p in &to_copy {
+                    copy_one_path(&mut existing_val, &incoming_val, p)?;
                 }
             }
         }
@@ -279,10 +281,8 @@ mod tests {
                                 collect_dotted_paths(&incoming_val, "", &mut out);
                                 out
                             });
-                            for p in collected.iter() {
-                                if re.is_match(p) {
-                                    copy_one_path(&mut existing_val, &incoming_val, p).unwrap();
-                                }
+                            for p in &shallowest_matches(collected, &re) {
+                                copy_one_path(&mut existing_val, &incoming_val, p).unwrap();
                             }
                         }
                     }

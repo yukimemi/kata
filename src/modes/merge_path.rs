@@ -47,6 +47,40 @@ pub fn parse_path_spec(s: &str) -> Result<PathSpec> {
     Ok(PathSpec::Literal(s.to_string()))
 }
 
+/// From the full list of incoming dotted paths, pick every path
+/// that matches `re` AND has no ancestor (in the matched subset)
+/// also matching `re`. Copying an ancestor already brings in the
+/// whole subtree, so the children would be redundant traversals
+/// and (for merge-toml) redundant `items_equivalent` calls. See
+/// #90 review.
+///
+/// Ancestor detection uses dotted-prefix comparison anchored on
+/// `.` so `tasks` doesn't accidentally swallow `tasks-clean`
+/// (`tasks-clean.foo` is NOT a descendant of `tasks`). Two-pass
+/// avoids the quadratic blow-up of comparing every matched path
+/// against every other: pass 1 collects the matches, pass 2
+/// keeps the ones whose dotted ancestors aren't in the set.
+pub fn shallowest_matches(all_paths: &[String], re: &regex::Regex) -> Vec<String> {
+    let mut matched: Vec<&String> = all_paths.iter().filter(|p| re.is_match(p)).collect();
+    if matched.len() <= 1 {
+        return matched.into_iter().cloned().collect();
+    }
+    // Sort by length so the shallowest ancestors come first — the
+    // retain step below can then short-circuit early when an
+    // ancestor is found.
+    matched.sort_by_key(|p| p.len());
+    let mut keep: Vec<&String> = Vec::with_capacity(matched.len());
+    for p in matched {
+        let has_ancestor_in_keep = keep.iter().any(|k| {
+            k.len() < p.len() && p.as_bytes()[k.len()] == b'.' && p.starts_with(k.as_str())
+        });
+        if !has_ancestor_in_keep {
+            keep.push(p);
+        }
+    }
+    keep.into_iter().cloned().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +122,47 @@ mod tests {
     fn invalid_regex_surfaces_an_error() {
         let err = parse_path_spec(r"//[unbalanced//").unwrap_err();
         assert!(matches!(err, Error::Merge(_)));
+    }
+
+    #[test]
+    fn shallowest_matches_drops_descendants_when_ancestor_already_matches() {
+        // Regex matches everything → keep only top-level keys.
+        let paths = vec![
+            "tasks".to_string(),
+            "tasks.default".to_string(),
+            "tasks.default.deps".to_string(),
+            "tasks.check".to_string(),
+            "dependencies".to_string(),
+            "dependencies.serde".to_string(),
+        ];
+        let re = regex::Regex::new(".+").unwrap();
+        let mut kept = shallowest_matches(&paths, &re);
+        kept.sort();
+        assert_eq!(kept, vec!["dependencies".to_string(), "tasks".to_string()],);
+    }
+
+    #[test]
+    fn shallowest_matches_does_not_treat_sibling_prefixes_as_ancestors() {
+        // `tasks` is NOT an ancestor of `tasks-clean.foo` because
+        // the next byte after the prefix isn't `.`. Both must
+        // survive.
+        let paths = vec!["tasks".to_string(), "tasks-clean.foo".to_string()];
+        let re = regex::Regex::new(".+").unwrap();
+        let mut kept = shallowest_matches(&paths, &re);
+        kept.sort();
+        assert_eq!(
+            kept,
+            vec!["tasks".to_string(), "tasks-clean.foo".to_string()],
+        );
+    }
+
+    #[test]
+    fn shallowest_matches_keeps_lone_leaf_when_ancestor_not_matched() {
+        // Regex matches a leaf but not its parent — the leaf is the
+        // shallowest reachable match; keep it.
+        let paths = vec!["tasks".to_string(), "tasks.test".to_string()];
+        let re = regex::Regex::new(r"\.test$").unwrap();
+        let kept = shallowest_matches(&paths, &re);
+        assert_eq!(kept, vec!["tasks.test".to_string()]);
     }
 }

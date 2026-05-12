@@ -46,7 +46,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use toml_edit::{DocumentMut, Item, Table};
 
-use super::merge_path::{PathSpec, parse_path_spec};
+use super::merge_path::{PathSpec, parse_path_spec, shallowest_matches};
 
 use crate::error::{Error, Result};
 
@@ -158,10 +158,18 @@ fn compute_merged(ctx: &ActionContext<'_>) -> Result<String> {
                     collect_dotted_paths(incoming_doc.as_item(), "", &mut out);
                     out
                 });
-                for p in collected.iter() {
-                    if re.is_match(p) {
-                        copy_one_path(&mut existing_doc, &incoming_doc, p)?;
-                    }
+                // Drop child paths when an ancestor also matches:
+                // copying the ancestor already brings the whole
+                // subtree, so iterating over the children would
+                // re-traverse the same data and (more expensively)
+                // re-run `items_equivalent` per leaf — see
+                // gemini's #90 review. Ancestor detection uses
+                // dotted-prefix comparison with an explicit `.`
+                // separator so `tasks` doesn't accidentally swallow
+                // `tasks-clean`.
+                let to_copy = shallowest_matches(collected, &re);
+                for p in &to_copy {
+                    copy_one_path(&mut existing_doc, &incoming_doc, p)?;
                 }
             }
         }
@@ -365,10 +373,8 @@ mod tests {
                                 collect_dotted_paths(incoming_doc.as_item(), "", &mut out);
                                 out
                             });
-                            for p in collected.iter() {
-                                if re.is_match(p) {
-                                    copy_one_path(&mut existing_doc, &incoming_doc, p).unwrap();
-                                }
+                            for p in &shallowest_matches(collected, &re) {
+                                copy_one_path(&mut existing_doc, &incoming_doc, p).unwrap();
                             }
                         }
                     }
