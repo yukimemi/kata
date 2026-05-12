@@ -25,8 +25,29 @@ use crate::manifest::VarSpec;
 
 const ENV_PREFIX: &str = "KATA_VAR_";
 
-/// Per-PJ vars file path, relative to the PJ root.
-const VARS_FILE_REL: &str = ".kata/vars.toml";
+/// Directory inside a PJ that holds kata-managed bookkeeping plus
+/// any consumer-owned `vars*.toml` files. See [`matches_vars_pattern`]
+/// for the file-name rule used to pick everything that contributes.
+pub(crate) const KATA_DIR_REL: &str = ".kata";
+
+/// Recognise both the historic single-file form (`.kata/vars.toml`)
+/// and the layered form (`.kata/vars.<layer>.toml`) introduced in
+/// #86. `vars.toml` is treated as one of the matched files; the
+/// caller sorts the list alphabetically before merging.
+pub(crate) fn matches_vars_pattern(name: &str) -> bool {
+    if name == "vars.toml" {
+        return true;
+    }
+    // `vars.<something>.toml` — non-empty middle segment, no
+    // trailing dot. `vars..toml` is rejected (would be a typo).
+    let Some(rest) = name.strip_prefix("vars.") else {
+        return false;
+    };
+    let Some(middle) = rest.strip_suffix(".toml") else {
+        return false;
+    };
+    !middle.is_empty() && !middle.starts_with('.')
+}
 
 /// Where a resolved var came from. Used downstream by the runner to
 /// decide which vars to persist in `applied.toml.vars` (only the
@@ -118,24 +139,58 @@ impl VarSources {
         out
     }
 
-    /// Read `<pj_root>/.kata/vars.toml` into a fresh table. Missing
-    /// file is not an error — vars.toml is opt-in. A present-but-
-    /// malformed file is a hard error so the consumer notices their
-    /// typo before it silently degrades to defaults. Read directly
-    /// (rather than `exists()` then read) so a file that disappears
-    /// between the check and the read isn't promoted to a hard error,
-    /// and so I/O failures other than NotFound surface with the path
-    /// attached via `Error::io_at`.
+    /// Discover every `<pj_root>/.kata/vars*.toml` and deep-merge
+    /// them into one table. Each layer's `vars.<name>.toml` (#86)
+    /// is read independently; `vars.toml` keeps the historic
+    /// single-file role.
+    ///
+    /// Discovery + merge order: alphabetical by filename. With the
+    /// usual yukimemi layer names this orders e.g. `vars.react.toml`
+    /// then `vars.rust.toml` then `vars.toml` — `vars.toml`
+    /// (no middle segment) sorts after every `vars.X.toml` because
+    /// `vars.` < `vars.X` lexicographically, so the bare base file
+    /// wins on a leaf-key conflict (its deep-merge happens last).
+    /// Single-file PJs land on the original behaviour unchanged.
+    ///
+    /// Missing `.kata` directory is not an error (vars.toml is
+    /// opt-in). A present-but-malformed file is a hard error so
+    /// the consumer notices their typo before it silently degrades
+    /// to defaults.
     pub fn load_vars_file(pj_root: &Utf8Path) -> Result<toml::Table> {
-        let path = pj_root.join(VARS_FILE_REL);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
+        let kata_dir = pj_root.join(KATA_DIR_REL);
+        let entries = match std::fs::read_dir(kata_dir.as_std_path()) {
+            Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(toml::Table::new());
             }
-            Err(e) => return Err(Error::io_at(path.as_std_path(), e)),
+            Err(e) => return Err(Error::io_at(kata_dir.as_std_path(), e)),
         };
-        toml::from_str(&content).map_err(|e| Error::Config(format!("parse {path}: {e}")))
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| Error::io_at(kata_dir.as_std_path(), e))?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if matches_vars_pattern(name) {
+                paths.push(path);
+            }
+        }
+        // Alphabetical so the merge order is deterministic across
+        // platforms (read_dir is not). See the module-level doc on
+        // ordering — bare `vars.toml` sorts last and therefore wins
+        // on a leaf-key conflict.
+        paths.sort();
+
+        let mut merged = toml::Table::new();
+        for path in paths {
+            let content =
+                std::fs::read_to_string(&path).map_err(|e| Error::io_at(path.as_path(), e))?;
+            let parsed: toml::Table = toml::from_str(&content)
+                .map_err(|e| Error::Config(format!("parse {}: {e}", path.display())))?;
+            deep_merge_table(&mut merged, parsed);
+        }
+        Ok(merged)
     }
 }
 
@@ -598,6 +653,79 @@ mod tests {
         std::fs::write(root.join(".kata/vars.toml"), "this is = not [valid\n").unwrap();
         let err = VarSources::load_vars_file(root).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn load_vars_file_merges_layered_vars_toml_files() {
+        // Issue #86: each template layer ships its own
+        // `.kata/vars.<layer>.toml`. The consumer-side loader
+        // discovers all of them and deep-merges in alphabetical order.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join(".kata")).unwrap();
+        // pj-base layer
+        std::fs::write(
+            root.join(".kata/vars.toml"),
+            "[actions]\ncheckout = \"v4\"\n",
+        )
+        .unwrap();
+        // pj-rust layer
+        std::fs::write(
+            root.join(".kata/vars.rust.toml"),
+            "[actions]\nswatinem = \"v2\"\n",
+        )
+        .unwrap();
+        // pj-react layer
+        std::fs::write(
+            root.join(".kata/vars.react.toml"),
+            "[actions]\nsetup_node = \"v4\"\n",
+        )
+        .unwrap();
+
+        let out = VarSources::load_vars_file(root).unwrap();
+        let actions = out["actions"].as_table().expect("actions table");
+        assert_eq!(actions["checkout"].as_str(), Some("v4"));
+        assert_eq!(actions["swatinem"].as_str(), Some("v2"));
+        assert_eq!(actions["setup_node"].as_str(), Some("v4"));
+    }
+
+    #[test]
+    fn load_vars_file_bare_vars_toml_wins_on_leaf_conflict() {
+        // The alphabetical order chosen for merging means
+        // `vars.<X>.toml` is merged BEFORE `vars.toml` (because
+        // `vars.` < `vars.X` lexicographically). On a leaf-key
+        // conflict, the bare `vars.toml` therefore wins — which
+        // is the historic single-file behaviour for PJs that pin
+        // values in the consumer-owned `vars.toml`.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join(".kata")).unwrap();
+        std::fs::write(
+            root.join(".kata/vars.rust.toml"),
+            "version = \"layer-rust\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".kata/vars.toml"),
+            "version = \"consumer-pinned\"\n",
+        )
+        .unwrap();
+        let out = VarSources::load_vars_file(root).unwrap();
+        assert_eq!(out["version"].as_str(), Some("consumer-pinned"));
+    }
+
+    #[test]
+    fn matches_vars_pattern_rules() {
+        assert!(matches_vars_pattern("vars.toml"));
+        assert!(matches_vars_pattern("vars.rust.toml"));
+        assert!(matches_vars_pattern("vars.x.toml"));
+        // Negative cases
+        assert!(!matches_vars_pattern("varz.toml"));
+        assert!(!matches_vars_pattern("not-vars.toml"));
+        assert!(!matches_vars_pattern("vars.tom")); // wrong suffix
+        assert!(!matches_vars_pattern("vars..toml")); // empty middle
+        assert!(!matches_vars_pattern("vars.toml.bak"));
+        assert!(!matches_vars_pattern("vars"));
     }
 
     #[test]

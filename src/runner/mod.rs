@@ -613,29 +613,32 @@ pub async fn plan_pj(
 /// early). Templates that need a Tera-templated `dst` will silently
 /// skip; that's the right behaviour for now.
 fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table> {
-    const VARS_FILE_REL: &str = ".kata/vars.toml";
     let mut seed = toml::Table::new();
+    // Each layer ships its own `vars.toml` (#86: also `vars.<layer>.toml`).
+    // We pull every `[[file]]` whose dst lands inside `.kata/` and
+    // matches the vars-file naming rule (`vars.toml` or
+    // `vars.<name>.toml`). Layered seeds compose across templates in
+    // compose order, and within one template alphabetically — same
+    // ordering rule the consumer-side discovery uses.
     for handle in handles {
-        for spec in &handle.manifest.files {
-            // Compute the effective dst the same way the apply loop
-            // does for literal cases. (See `render_dst` for the Tera
-            // path — we deliberately don't render here.)
-            let effective_dst: std::borrow::Cow<'_, str> = match &spec.dst {
-                Some(d) => std::borrow::Cow::Borrowed(d.as_str()),
-                None => std::borrow::Cow::Borrowed(
-                    spec.src.strip_suffix(".tera").unwrap_or(spec.src.as_str()),
-                ),
-            };
-            if effective_dst != VARS_FILE_REL {
-                continue;
-            }
-            // Same security check as the apply loop (line ~171) —
-            // refuse template-supplied paths that try to escape the
+        let mut layer_specs: Vec<&crate::manifest::FileSpec> = handle
+            .manifest
+            .files
+            .iter()
+            .filter(|spec| spec_is_vars_seed(spec))
+            .collect();
+        // Stable within a single template so re-ordering the
+        // `[[file]]` array in the manifest doesn't change which
+        // value wins on a leaf-key conflict.
+        layer_specs.sort_by_key(|spec| effective_dst_of(spec).to_string());
+        for spec in layer_specs {
+            // Same security check as the apply loop — refuse
+            // template-supplied paths that try to escape the
             // template root. `collect_template_seed_vars` runs
             // BEFORE the apply loop's check, so without this a
-            // hostile / buggy manifest could read e.g. `../../etc/passwd`
-            // via a `[[file]] src = "../etc/passwd", dst =
-            // ".kata/vars.toml"` declaration.
+            // hostile / buggy manifest could read e.g.
+            // `../../etc/passwd` via a `[[file]] src =
+            // "../etc/passwd", dst = ".kata/vars.toml"` declaration.
             check_relative_contained(&spec.src, "template src")?;
             let src_abs = handle.root.join(&spec.src);
             let content = match std::fs::read_to_string(src_abs.as_std_path()) {
@@ -649,6 +652,36 @@ fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table>
         }
     }
     Ok(seed)
+}
+
+/// True when a file-spec ships an entry that lands inside `.kata/`
+/// with a name matching the vars-file pattern. Used by
+/// [`collect_template_seed_vars`] to pull every per-layer seed.
+fn spec_is_vars_seed(spec: &crate::manifest::FileSpec) -> bool {
+    use crate::render::vars::{KATA_DIR_REL, matches_vars_pattern};
+    let dst = effective_dst_of(spec);
+    let prefix = format!("{KATA_DIR_REL}/");
+    let Some(name) = dst.strip_prefix(prefix.as_str()) else {
+        return false;
+    };
+    // Reject any further sub-directory under `.kata/` (e.g.
+    // `.kata/sub/vars.toml`) — kata's bookkeeping lives flat.
+    if name.contains('/') {
+        return false;
+    }
+    matches_vars_pattern(name)
+}
+
+/// Compute the effective destination the same way the apply loop
+/// does for literal cases — Tera-templated dsts are skipped (we
+/// don't have a render context this early). Out-of-line so
+/// `collect_template_seed_vars` can call it for both its filter
+/// and its alphabetical sort key.
+fn effective_dst_of(spec: &crate::manifest::FileSpec) -> &str {
+    match &spec.dst {
+        Some(d) => d.as_str(),
+        None => spec.src.strip_suffix(".tera").unwrap_or(spec.src.as_str()),
+    }
 }
 
 /// Centralised so `apply_to_pj` and `plan_pj` cannot drift.
