@@ -63,6 +63,20 @@ pub struct PjApplyOptions {
     /// run via `--ai-concurrency <N>`. Capped to >= 1 so a 0
     /// from a hand-edited config doesn't deadlock the apply.
     pub ai_concurrency: usize,
+    /// `--reseed <PATH>` (repeatable): dst paths whose
+    /// `when = "once"` gate should be bypassed for this apply,
+    /// re-emitting the template seed even when `applied.toml`
+    /// records `once_applied = true`. The post-loop pass
+    /// re-stamps `once_applied = true` for any reseeded entry
+    /// that actually ran, leaving the persisted `applied.toml`
+    /// identical to a fresh apply. Paths not declared in any
+    /// active manifest are a silent no-op for that PJ.
+    ///
+    /// Stored as a `HashSet` so the per-entry membership check
+    /// in `apply_to_pj` is O(1) and so `kata apply --all` only
+    /// pays the `Vec → HashSet` conversion once at the CLI
+    /// boundary instead of once per PJ.
+    pub reseed: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -94,6 +108,26 @@ pub async fn apply_to_pj(
     agent: Option<Arc<dyn AiAgent>>,
 ) -> Result<PjApplyResult> {
     let mut applied = AppliedState::load(&pj_root)?;
+
+    // `--reseed <PATH>` (#82) is implemented as a per-entry gate
+    // bypass: when `opts.reseed.contains(&state_key)` the
+    // `when = "once"` block (skip / adoption / non-regular
+    // refusal) is skipped entirely and the entry's mode runs as
+    // if the file had never been applied. The post-loop pass
+    // re-stamps `once_applied = true` because the entry hits
+    // `once_applied_dsts` via the standard write path, so the
+    // final persisted `applied.toml` is identical to a fresh
+    // apply.
+    //
+    // Earlier drafts also flipped `applied.files[path].once_applied`
+    // to false at this point, but that was a redundant footgun:
+    // because the gate is bypassed via `opts.reseed.contains(...)`,
+    // the in-memory flag is never consulted. Worse, if a reseeded
+    // entry was later short-circuited by a `when_expr` evaluating
+    // to false it would never reach the post-loop re-stamping,
+    // and the cleared flag would be persisted to disk — losing
+    // the consumer's recorded "once" state. Removed; see PR #89
+    // discussion.
 
     // Global AI gate. We always create one so `ActionContext` can
     // borrow it unconditionally; the cap is `opts.ai_concurrency`
@@ -236,8 +270,15 @@ pub async fn apply_to_pj(
                 initial_disk_by_dst.insert(state_key.clone(), initial);
             }
 
-            // when = "once" gating
-            if spec.when == WhenMode::Once && !opts.force_once {
+            // when = "once" gating. `--reseed <path>` bypasses the
+            // whole once-gate block (skip-when-applied, adoption,
+            // non-regular refusal) so the explicit intent of
+            // "re-emit the template seed over whatever's on disk
+            // for this path" is honoured. The post-loop pass still
+            // re-stamps `once_applied = true` because the entry's
+            // mode runs and lands in `once_applied_dsts`. See #82.
+            if spec.when == WhenMode::Once && !opts.force_once && !opts.reseed.contains(&state_key)
+            {
                 if let Some(state) = applied.files.get(&state_key) {
                     if state.once_applied {
                         action_indices_by_dst

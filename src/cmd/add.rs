@@ -95,6 +95,10 @@ pub async fn run(
         agent_backend,
         ai_mode_override,
         ai_concurrency,
+        // `add` introduces a new template whose `when = "once"`
+        // files aren't yet in `applied.files` — there's no flag
+        // to clear. Always empty.
+        reseed: std::collections::HashSet::new(),
     };
     let result = apply_to_pj(
         project,

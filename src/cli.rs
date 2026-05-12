@@ -194,6 +194,16 @@ pub enum Command {
         /// Mutually exclusive with `--allow-dirty`. Requires `--all`.
         #[arg(long = "skip-dirty", requires = "all")]
         skip_dirty: bool,
+        /// Re-emit a `when = "once"` file by clearing its
+        /// `once_applied = true` flag for this run only (it's
+        /// re-set at the end of the run, leaving final state the
+        /// same as a fresh apply).
+        /// Repeatable: `--reseed renovate.json --reseed apm.yml`.
+        /// Under `--all`, the path is applied to every matched PJ;
+        /// a path not declared by a PJ's manifest is a silent no-op
+        /// for that PJ.
+        #[arg(long = "reseed", value_name = "PATH")]
+        reseed: Vec<String>,
     },
 
     /// Show what would change if `apply` were to run. Without
@@ -404,6 +414,7 @@ impl Cli {
                 pj_concurrency,
                 allow_dirty,
                 skip_dirty,
+                reseed,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
                 if all {
@@ -422,6 +433,7 @@ impl Cli {
                         no_color,
                         allow_dirty,
                         skip_dirty,
+                        reseed,
                     )
                     .await
                 } else {
@@ -437,6 +449,7 @@ impl Cli {
                         ai_concurrency,
                         interactive,
                         no_color,
+                        reseed,
                     )
                     .await
                 }

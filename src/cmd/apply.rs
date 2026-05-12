@@ -38,6 +38,7 @@ pub async fn run(
     ai_concurrency_override: Option<usize>,
     interactive: bool,
     no_color: bool,
+    reseed: Vec<String>,
 ) -> Result<()> {
     let cwd = resolve_pj_root(at)?;
     let pj_root = crate::paths::find_pj_root(&cwd).ok_or_else(|| {
@@ -63,6 +64,7 @@ pub async fn run(
         ai_mode_override,
         ai_concurrency_override,
         interactive,
+        reseed,
     )?;
 
     let result = apply_one(project, ai_kind, no_ai, opts_template, Some(cwd)).await?;
@@ -99,6 +101,7 @@ pub async fn run_all(
     no_color: bool,
     allow_dirty: bool,
     skip_dirty: bool,
+    reseed: Vec<String>,
 ) -> Result<()> {
     let config = GlobalConfig::load()?;
     let mut projects = select_registered_projects(&config, &tag_filter);
@@ -191,6 +194,7 @@ pub async fn run_all(
         ai_mode_override,
         ai_concurrency_override,
         interactive,
+        reseed,
     )?;
 
     let pj_concurrency = resolve_pj_concurrency(pj_concurrency_override);
@@ -250,6 +254,7 @@ fn build_options(
     ai_mode_override: Option<AiMode>,
     ai_concurrency_override: Option<usize>,
     interactive: bool,
+    reseed: Vec<String>,
 ) -> Result<PjApplyOptions> {
     let ai_concurrency = resolve_ai_concurrency(ai_concurrency_override);
     Ok(PjApplyOptions {
@@ -266,6 +271,10 @@ fn build_options(
         agent_backend: None,
         ai_mode_override,
         ai_concurrency,
+        // Convert once at the CLI boundary so each `apply_one` in
+        // `--all`'s tokio fan-out clones the same `HashSet` rather
+        // than re-allocating from a `Vec` per PJ.
+        reseed: reseed.into_iter().collect(),
     })
 }
 

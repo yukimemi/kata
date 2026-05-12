@@ -94,6 +94,9 @@ pub async fn run(
         agent_backend,
         ai_mode_override,
         ai_concurrency,
+        // `init` has no recorded `once_applied = true` yet, so
+        // reseeding is a no-op. Always empty.
+        reseed: std::collections::HashSet::new(),
     };
     let result = apply_to_pj(
         project,
