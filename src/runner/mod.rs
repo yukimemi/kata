@@ -219,8 +219,20 @@ pub async fn apply_to_pj(
             // Drives the post-loop net-delta pass (#81). Safe to read
             // even for dry-run; the post-loop pass just skips itself
             // there.
+            //
+            // `is_file()` guard: if the dst is a directory (or any
+            // non-regular special file), `read_existing_text` would
+            // surface a generic I/O error before the per-entry once
+            // path can emit its more helpful "destination exists but
+            // is not a regular file" message. Treat non-files as
+            // "no snapshot, no collapse" and let downstream handling
+            // produce the dedicated error.
             if !initial_disk_by_dst.contains_key(&state_key) {
-                let initial = read_existing_text(dst_abs.as_path())?;
+                let initial = if dst_abs.is_file() {
+                    read_existing_text(dst_abs.as_path())?
+                } else {
+                    None
+                };
                 initial_disk_by_dst.insert(state_key.clone(), initial);
             }
 
@@ -461,18 +473,37 @@ pub async fn apply_to_pj(
             if indices.len() < 2 {
                 continue;
             }
+            // Nothing to collapse if none of the entries actually
+            // wrote — skip the disk re-read entirely. Common case
+            // when both layers reported `Unchanged` already.
+            let has_wrote = indices.iter().any(|&i| {
+                actions
+                    .get(i)
+                    .is_some_and(|(_, k)| matches!(k, OutcomeKind::Wrote))
+            });
+            if !has_wrote {
+                continue;
+            }
             let dst_abs = pj_root.join(dst_key);
-            let final_disk = read_existing_text(dst_abs.as_path())?;
+            // `is_file()` guard so a dst that ended up as a directory
+            // (impossible via kata's own write path but cheap defence)
+            // surfaces as "no final snapshot" rather than a generic
+            // I/O error.
+            let final_disk = if dst_abs.is_file() {
+                read_existing_text(dst_abs.as_path())?
+            } else {
+                None
+            };
             let initial = initial_disk_by_dst
                 .get(dst_key)
                 .cloned()
                 .unwrap_or_default();
             if initial == final_disk {
                 for &i in indices {
-                    if let Some(slot) = actions.get_mut(i)
-                        && matches!(slot.1, OutcomeKind::Wrote)
-                    {
-                        slot.1 = OutcomeKind::Unchanged;
+                    if let Some(slot) = actions.get_mut(i) {
+                        if matches!(slot.1, OutcomeKind::Wrote) {
+                            slot.1 = OutcomeKind::Unchanged;
+                        }
                     }
                 }
                 // If every `Wrote` for this dst collapsed away, the
