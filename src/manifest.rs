@@ -100,6 +100,7 @@ pub enum HowMode {
     MergeSection,
     MergeToml,
     MergeYaml,
+    MergeJson,
     Ai,
     Script,
 }
