@@ -27,12 +27,42 @@ use tokio::process::Command;
 
 use crate::error::{Error, Result};
 
-/// Paths kata considers its own bookkeeping. These never count as
-/// "user dirty" — they exist precisely so kata can record state,
-/// and jj-colocated repos routinely show `.kata/applied.toml` as
-/// `M` right after a `git push` (jj's import-from-git effect)
-/// even though the consumer hasn't touched it.
-const KATA_OWNED_PREFIXES: &[&str] = &[".kata/"];
+/// Files kata itself manages inside `<pj>/.kata/`. These are
+/// filtered from the dirty-file list because:
+///
+/// - `.kata/applied.toml` is jj-import-from-git noise: a jj-
+///   colocated repo flags it as `M` right after `git push` moves
+///   the upstream pointer, even though the consumer didn't touch
+///   it.
+/// - `.kata/vars*.toml` is consumer-owned but kata writes the
+///   initial seed during `init` and rewrites parts of it during
+///   `apply --reseed`; treating it as kata's bookkeeping
+///   prevents spurious "dirty" flags during a fresh seed cycle.
+///
+/// Anything else under `.kata/` (consumer-authored notes,
+/// hand-staged experiments, etc.) is **NOT** filtered — those
+/// count as real user WIP and the pre-flight check should
+/// surface them like any other file.
+fn is_kata_owned(path: &str) -> bool {
+    if path == ".kata/applied.toml" {
+        return true;
+    }
+    // `.kata/vars.toml` and `.kata/vars.<layer>.toml` — kata-
+    // managed seeds (see #86). Nested `if let`s instead of a
+    // let-chain so the check compiles on MSRV 1.85
+    // (let_chains stabilised in 1.88).
+    if let Some(rest) = path.strip_prefix(".kata/") {
+        if let Some(stripped) = rest.strip_suffix(".toml") {
+            if stripped == "vars" {
+                return true;
+            }
+            if let Some(layer) = stripped.strip_prefix("vars.") {
+                return !layer.is_empty() && !layer.contains('/');
+            }
+        }
+    }
+    false
+}
 
 /// Inspect `dir` for uncommitted user work. Returns a list of
 /// relative paths the user has modified / added / removed, with
@@ -81,31 +111,43 @@ pub(crate) fn parse_porcelain(porcelain: &str) -> Vec<String> {
 }
 
 /// Pull the path out of one porcelain v1 line. Format is two
-/// status chars + space + path (rename lines use ` -> ` but the
-/// destination is the relevant edit).
+/// status chars + space + path.
+///
+/// `git status --porcelain` only emits ` -> ` between two paths
+/// when the index status (col 1) is `R` (rename) or `C` (copy);
+/// for every other status the path can legitimately contain that
+/// substring (`a -> b.txt` is a valid filename, modified in
+/// place). So the rename/copy split must be gated on the status
+/// code rather than blindly searching for ` -> ` everywhere.
 fn parse_porcelain_line(line: &str) -> Option<String> {
     // Minimum porcelain line: 2 status chars + 1 space + 1+ char path.
     if line.len() < 4 {
         return None;
     }
+    let xy = &line[..2];
     let rest = &line[3..];
-    // Renames / copies show "A -> B" — the destination is the
-    // edit that lives on disk now, that's what matters.
-    let path = if let Some(arrow_at) = rest.find(" -> ") {
-        &rest[arrow_at + 4..]
+    // The index status (col 1) is what signals rename / copy
+    // (`Rxxx -> yyy`); the worktree status (col 2) doesn't.
+    let index_status = xy.chars().next().unwrap_or(' ');
+    let path = if matches!(index_status, 'R' | 'C') {
+        match rest.find(" -> ") {
+            Some(arrow_at) => &rest[arrow_at + 4..],
+            None => rest, // malformed, but better than dropping the line
+        }
     } else {
         rest
     };
-    let trimmed = path.trim().trim_matches('"');
+    // `trim_matches('"')` instead of `trim()` so a valid filename
+    // whose leading or trailing whitespace was preserved by git's
+    // quoting (`"  spaced.rs"`) survives. git quotes any path with
+    // funny characters, so leading/trailing whitespace inside the
+    // quotes is part of the actual filename.
+    let trimmed = path.trim_matches('"');
     if trimmed.is_empty() {
         None
     } else {
         Some(trimmed.replace('\\', "/"))
     }
-}
-
-fn is_kata_owned(path: &str) -> bool {
-    KATA_OWNED_PREFIXES.iter().any(|p| path.starts_with(p))
 }
 
 #[cfg(test)]
@@ -157,5 +199,66 @@ mod tests {
             parse_porcelain(out),
             vec!["file with spaces.rs".to_string()],
         );
+    }
+
+    #[test]
+    fn modified_path_containing_arrow_is_not_treated_as_rename() {
+        // Gemini PR #92 finding: `a -> b.txt` is a perfectly valid
+        // filename, modified in place. The rename split must only
+        // apply when the index status is `R`/`C`, otherwise we'd
+        // silently drop the prefix and report `b.txt` as the dirty
+        // path.
+        let out = " M a -> b.txt\n";
+        assert_eq!(parse_porcelain(out), vec!["a -> b.txt".to_string()]);
+    }
+
+    #[test]
+    fn rename_lines_only_split_on_r_or_c_status() {
+        // R = rename in index → split.
+        assert_eq!(
+            parse_porcelain("R  old.rs -> new.rs\n"),
+            vec!["new.rs".to_string()],
+        );
+        // C = copy in index → split.
+        assert_eq!(
+            parse_porcelain("C  src.rs -> dest.rs\n"),
+            vec!["dest.rs".to_string()],
+        );
+    }
+
+    #[test]
+    fn worktree_only_status_does_not_split_on_arrow() {
+        // Worktree-only status (space in col 1) plus `R`/`C` in
+        // col 2 isn't a rename — only the index status matters for
+        // the porcelain v1 format.
+        let out = " M weird name -> still weird.rs\n";
+        assert_eq!(
+            parse_porcelain(out),
+            vec!["weird name -> still weird.rs".to_string()],
+        );
+    }
+
+    #[test]
+    fn filters_only_intended_kata_files() {
+        // CodeRabbit PR #92 finding: `.kata/applied.toml` and
+        // `.kata/vars*.toml` are filtered (kata-managed
+        // bookkeeping), but consumer-authored files elsewhere
+        // under `.kata/` count as real WIP.
+        let out = " M .kata/applied.toml\n M .kata/vars.toml\n M .kata/vars.rust.toml\n M .kata/scratch.md\n M src/lib.rs\n";
+        let mut dirty = parse_porcelain(out);
+        dirty.sort();
+        assert_eq!(
+            dirty,
+            vec![".kata/scratch.md".to_string(), "src/lib.rs".to_string()],
+        );
+    }
+
+    #[test]
+    fn quoted_path_with_inner_whitespace_is_preserved() {
+        // Gemini PR #92 finding: previously `.trim()` would strip
+        // leading/trailing whitespace that was meaningful inside
+        // the quotes. With `trim_matches('"')` it survives.
+        let out = " M \"  leading.rs\"\n";
+        assert_eq!(parse_porcelain(out), vec!["  leading.rs".to_string()]);
     }
 }

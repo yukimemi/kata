@@ -115,32 +115,63 @@ pub async fn run_all(
 
     // Pre-flight VCS dirty check (#80). Default behaviour aborts
     // before any PJ is touched if any has uncommitted user work,
-    // so kata-driven changes don't get mixed with WIP. `--skip-dirty`
-    // drops dirty PJs silently; `--allow-dirty` proceeds anyway
-    // (the historical behaviour before this gate).
+    // so kata-driven changes don't get mixed with WIP.
+    // `--skip-dirty` drops dirty PJs silently (no report
+    // printed); `--allow-dirty` proceeds anyway (the historical
+    // behaviour before this gate).
     if !allow_dirty {
-        let mut dirty: Vec<(String, Utf8PathBuf, Vec<String>)> = Vec::new();
+        // Run `git status` in parallel across the registry —
+        // sequential per-PJ spawns get linear with registry size
+        // and significantly delay the start of `apply --all` for
+        // users with many registered PJs (Gemini PR #92).
+        // Cap with the same `pj_concurrency` as the apply
+        // fan-out so we don't fork-bomb git either.
+        let pj_concurrency = resolve_pj_concurrency(pj_concurrency_override);
+        let sema = Arc::new(Semaphore::new(pj_concurrency.max(1)));
+        let mut set = JoinSet::new();
         for entry in &projects {
-            if let Some(files) = crate::vcs::dirty_files(&entry.path).await? {
+            let name = entry.name.clone();
+            let path = entry.path.clone();
+            let sema = sema.clone();
+            set.spawn(async move {
+                let _permit = sema.acquire_owned().await.expect("sema closed");
+                let result = crate::vcs::dirty_files(&path).await;
+                (name, path, result)
+            });
+        }
+
+        let mut dirty: Vec<(String, Utf8PathBuf, Vec<String>)> = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            let (name, path, result) = joined.map_err(|e| {
+                Error::Other(anyhow::anyhow!("pre-flight dirty check join error: {e}"))
+            })?;
+            if let Some(files) = result? {
                 if !files.is_empty() {
-                    dirty.push((entry.name.clone(), entry.path.clone(), files));
+                    dirty.push((name, path, files));
                 }
             }
         }
+        // `JoinSet` doesn't preserve spawn order; sort so the
+        // dirty report is deterministic (matches the registry
+        // order the user expects).
+        dirty.sort_by(|a, b| a.0.cmp(&b.0));
+
         if !dirty.is_empty() {
-            print_dirty_report(&dirty, no_color);
             if skip_dirty {
+                // Silent skip per the `--skip-dirty` contract:
+                // drop the dirty PJs from the work list and
+                // continue with the rest. Nothing is printed at
+                // this stage so the operator can dedicate stderr
+                // attention to genuine apply output.
                 let dirty_paths: std::collections::HashSet<Utf8PathBuf> =
                     dirty.iter().map(|(_, p, _)| p.clone()).collect();
                 projects.retain(|p| !dirty_paths.contains(&p.path));
-                eprintln!(
-                    "skipping {} dirty PJ(s); proceeding with the rest.",
-                    dirty.len()
-                );
                 if projects.is_empty() {
                     return Ok(());
                 }
             } else {
+                // Default: print the dirty report and abort.
+                print_dirty_report(&dirty, no_color);
                 return Err(Error::Other(anyhow::anyhow!(
                     "{} PJ(s) have uncommitted work. Re-run with `--allow-dirty` to proceed \
                      or `--skip-dirty` to apply only to clean PJs.",
@@ -318,8 +349,13 @@ fn print_pj_outcome(result: &PjApplyResult, path: &str, no_color: bool) {
 /// Render the pre-flight dirty-PJ list (#80) to stderr — one PJ
 /// per row, with the first few dirty paths inline so the user can
 /// spot whether the WIP is plausibly safe to ignore (e.g. a stray
-/// Cargo.lock bump kata won't touch anyway). `no_color` is honoured
-/// to stay compatible with the existing UI conventions.
+/// Cargo.lock bump kata won't touch anyway).
+///
+/// The output is plain text today and ignores the `no_color`
+/// arg — kept as a parameter so a future colourised version (PJ
+/// names in bold, dirty paths in red) can flip it on without a
+/// signature change. Suppress the unused warning explicitly with
+/// the `_` prefix until that lands. See PR #92 review.
 fn print_dirty_report(dirty: &[(String, Utf8PathBuf, Vec<String>)], _no_color: bool) {
     eprintln!("\ndirty PJ(s) — kata refuses to apply over uncommitted work:");
     for (name, path, files) in dirty {
