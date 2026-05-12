@@ -201,7 +201,10 @@ fn build_options(
         agent_backend: None,
         ai_mode_override,
         ai_concurrency,
-        reseed,
+        // Convert once at the CLI boundary so each `apply_one` in
+        // `--all`'s tokio fan-out clones the same `HashSet` rather
+        // than re-allocating from a `Vec` per PJ.
+        reseed: reseed.into_iter().collect(),
     })
 }
 

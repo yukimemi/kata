@@ -96,7 +96,7 @@ pub async fn run(
         ai_concurrency,
         // `init` has no recorded `once_applied = true` yet, so
         // reseeding is a no-op. Always empty.
-        reseed: Vec::new(),
+        reseed: std::collections::HashSet::new(),
     };
     let result = apply_to_pj(
         project,
