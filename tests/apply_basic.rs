@@ -1208,6 +1208,116 @@ fn once_flag_composes_across_multiple_entries_to_same_dst() {
 }
 
 #[test]
+fn merge_json_keeps_unlisted_keys_and_updates_listed_path() {
+    // Issue #71: `how = "merge-json"` should be the JSON analog
+    // of merge-toml — only the listed paths get copied from the
+    // template into the existing file; every other key (including
+    // consumer additions) is preserved.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "renovate.json"
+            how = "merge-json"
+            when = "always"
+            paths = ["extends", "packageRules"]
+            "#,
+        )
+        .file(
+            "renovate.json",
+            r#"{
+  "extends": ["github>yukimemi/renovate-config"],
+  "packageRules": [
+    { "matchManagers": ["cargo"], "schedule": "before 9am on monday" }
+  ]
+}
+"#,
+        );
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    // 1) init writes the seed file as-is (no existing target).
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // 2) Consumer adds a key the template doesn't know about and
+    // re-asserts the listed paths. Both unlisted additions should
+    // survive the next apply.
+    let edited = r#"{
+  "extends": ["github>yukimemi/renovate-config"],
+  "packageRules": [
+    { "matchManagers": ["cargo"], "schedule": "before 9am on monday" }
+  ],
+  "customManagers": [
+    { "customType": "regex", "managerFilePatterns": ["/Makefile.toml$/"] }
+  ],
+  "labels": ["dependencies"]
+}
+"#;
+    write(&pj.join("renovate.json"), edited);
+
+    // 3) Template bumps the listed path (`extends` gets an extra entry).
+    write(
+        &templates.join("pj-base/renovate.json"),
+        r#"{
+  "extends": ["github>yukimemi/renovate-config", "config:base"],
+  "packageRules": [
+    { "matchManagers": ["cargo"], "schedule": "before 9am on monday" }
+  ]
+}
+"#,
+    );
+
+    kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    let merged = std::fs::read_to_string(pj.join("renovate.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    // Listed path was updated to include the new entry.
+    assert_eq!(
+        v["extends"][0],
+        serde_json::Value::String("github>yukimemi/renovate-config".into())
+    );
+    assert_eq!(
+        v["extends"][1],
+        serde_json::Value::String("config:base".into()),
+        "extends should pick up the template's added entry: {merged}"
+    );
+    // Unlisted keys survived.
+    assert!(
+        v["customManagers"].is_array(),
+        "consumer's customManagers must survive: {merged}"
+    );
+    assert!(
+        v["labels"].is_array(),
+        "consumer's labels must survive: {merged}"
+    );
+}
+
+#[test]
 fn reapply_reports_unchanged_for_layered_always_entries_to_same_dst() {
     // Issue #81: when two `when="always"` entries target the same dst
     // (e.g. pj-base overwrites renri.toml, pj-rust merge-toml's

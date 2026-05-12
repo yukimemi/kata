@@ -4,6 +4,7 @@
 //! `Unimplemented` fallback shim.
 
 pub mod ai;
+pub mod merge_json;
 pub mod merge_path;
 pub mod merge_section;
 pub mod merge_toml;
@@ -25,6 +26,7 @@ use crate::manifest::{AiMode, FileSpec, HowMode};
 use crate::template::TemplateHandle;
 
 pub use ai::Ai;
+pub use merge_json::MergeJson;
 pub use merge_section::MergeSection;
 pub use merge_toml::MergeToml;
 pub use merge_yaml::MergeYaml;
@@ -147,6 +149,7 @@ pub fn for_how(how: HowMode) -> Box<dyn ApplyMode> {
         HowMode::MergeSection => Box::new(MergeSection),
         HowMode::MergeToml => Box::new(MergeToml),
         HowMode::MergeYaml => Box::new(MergeYaml),
+        HowMode::MergeJson => Box::new(MergeJson),
         HowMode::Ai => Box::new(Ai),
         HowMode::Script => Box::new(Script),
     }
