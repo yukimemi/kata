@@ -1316,3 +1316,105 @@ fn merge_json_keeps_unlisted_keys_and_updates_listed_path() {
         "consumer's labels must survive: {merged}"
     );
 }
+
+#[test]
+fn reapply_reports_unchanged_for_layered_always_entries_to_same_dst() {
+    // Issue #81: when two `when="always"` entries target the same dst
+    // (e.g. pj-base overwrites renri.toml, pj-rust merge-toml's
+    // `hooks.post_create` into it), a second apply that produces a
+    // byte-identical disk result must report `unchanged` for both
+    // entries — not `wrote`. Each layer individually still writes
+    // intermediate bytes (overwrite clobbers, then merge-toml restores),
+    // but the net disk delta across the entire apply is zero, so the
+    // reporting should reflect "no observable change to disk".
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "renri.toml.base"
+            dst = "renri.toml"
+            how = "overwrite"
+            when = "always"
+            "#,
+        )
+        .file("renri.toml.base", "[ui]\nshow_pr = true\n");
+
+    TemplateBuilder::new(templates.join("pj-rust"))
+        .manifest(
+            r#"
+            name = "pj-rust"
+            [[file]]
+            src = "renri.toml.rust"
+            dst = "renri.toml"
+            how = "merge-toml"
+            when = "always"
+            paths = ["hooks.post_create"]
+            "#,
+        )
+        .file(
+            "renri.toml.rust",
+            "[[hooks.post_create]]\ntype = \"command\"\nrun = \"cargo make on-add\"\n",
+        );
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        [[templates]]
+        source = "../templates/pj-rust"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    let body = std::fs::read_to_string(pj.join("renri.toml")).unwrap();
+    assert!(body.contains("show_pr = true"), "first apply: {body}");
+    assert!(
+        body.contains("post_create"),
+        "first apply (merge-toml layer): {body}"
+    );
+
+    // Second apply: net disk delta is zero. The runner internally writes
+    // twice (overwrite then merge-toml) but neither layer should be
+    // reported as `wrote` to the user.
+    let assertion = kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).to_string();
+
+    // The two renri.toml lines from this dst must both be `unchanged`.
+    let renri_lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("renri.toml"))
+        .collect();
+    assert_eq!(
+        renri_lines.len(),
+        2,
+        "expected one report line per layered entry, got:\n{stdout}"
+    );
+    for line in &renri_lines {
+        assert!(
+            line.contains("unchanged"),
+            "layered always entries with zero net disk delta must report \
+             `unchanged`, got: {line}\nfull stdout:\n{stdout}"
+        );
+    }
+}

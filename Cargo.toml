@@ -68,6 +68,9 @@ owo-colors = "4.3.0"
 # Hashing / glob / regex
 sha2 = "0.11"
 globset = "0.4.18"
+# Used by merge-toml / merge-yaml `paths` entries written in rvpm
+# `//.../` regex form; see #62.
+regex = "1.12.3"
 
 # Logging
 tracing = "0.1.44"
