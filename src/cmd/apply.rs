@@ -97,9 +97,11 @@ pub async fn run_all(
     pj_concurrency_override: Option<usize>,
     interactive: bool,
     no_color: bool,
+    allow_dirty: bool,
+    skip_dirty: bool,
 ) -> Result<()> {
     let config = GlobalConfig::load()?;
-    let projects = select_registered_projects(&config, &tag_filter);
+    let mut projects = select_registered_projects(&config, &tag_filter);
     if projects.is_empty() {
         if tag_filter.is_empty() {
             println!(
@@ -109,6 +111,43 @@ pub async fn run_all(
             println!("no registered projects matched all of: {tag_filter:?}");
         }
         return Ok(());
+    }
+
+    // Pre-flight VCS dirty check (#80). Default behaviour aborts
+    // before any PJ is touched if any has uncommitted user work,
+    // so kata-driven changes don't get mixed with WIP. `--skip-dirty`
+    // drops dirty PJs silently; `--allow-dirty` proceeds anyway
+    // (the historical behaviour before this gate).
+    if !allow_dirty {
+        let mut dirty: Vec<(String, Utf8PathBuf, Vec<String>)> = Vec::new();
+        for entry in &projects {
+            if let Some(files) = crate::vcs::dirty_files(&entry.path).await? {
+                if !files.is_empty() {
+                    dirty.push((entry.name.clone(), entry.path.clone(), files));
+                }
+            }
+        }
+        if !dirty.is_empty() {
+            print_dirty_report(&dirty, no_color);
+            if skip_dirty {
+                let dirty_paths: std::collections::HashSet<Utf8PathBuf> =
+                    dirty.iter().map(|(_, p, _)| p.clone()).collect();
+                projects.retain(|p| !dirty_paths.contains(&p.path));
+                eprintln!(
+                    "skipping {} dirty PJ(s); proceeding with the rest.",
+                    dirty.len()
+                );
+                if projects.is_empty() {
+                    return Ok(());
+                }
+            } else {
+                return Err(Error::Other(anyhow::anyhow!(
+                    "{} PJ(s) have uncommitted work. Re-run with `--allow-dirty` to proceed \
+                     or `--skip-dirty` to apply only to clean PJs.",
+                    dirty.len()
+                )));
+            }
+        }
     }
 
     let opts_template = build_options(
@@ -273,5 +312,27 @@ fn print_pj_outcome(result: &PjApplyResult, path: &str, no_color: bool) {
         for (dst, msg) in &result.errors {
             eprintln!("  {dst}: {msg}");
         }
+    }
+}
+
+/// Render the pre-flight dirty-PJ list (#80) to stderr — one PJ
+/// per row, with the first few dirty paths inline so the user can
+/// spot whether the WIP is plausibly safe to ignore (e.g. a stray
+/// Cargo.lock bump kata won't touch anyway). `no_color` is honoured
+/// to stay compatible with the existing UI conventions.
+fn print_dirty_report(dirty: &[(String, Utf8PathBuf, Vec<String>)], _no_color: bool) {
+    eprintln!("\ndirty PJ(s) — kata refuses to apply over uncommitted work:");
+    for (name, path, files) in dirty {
+        // Cap the inline preview at three paths so a PJ with a
+        // huge WIP doesn't drown the table; the count is preserved
+        // so the user knows how big the rest is.
+        let preview: Vec<&str> = files.iter().take(3).map(String::as_str).collect();
+        let extra = files.len().saturating_sub(preview.len());
+        let inline = if extra == 0 {
+            preview.join(", ")
+        } else {
+            format!("{}, +{} more", preview.join(", "), extra)
+        };
+        eprintln!("  {name} ({path}): {inline}");
     }
 }
