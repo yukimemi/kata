@@ -173,6 +173,26 @@ pub async fn apply_to_pj(
     // merge-toml), defeating composition. See #85.
     let mut wrote_in_run: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Disk content per dst at the start of this apply, captured the
+    // first time we touch that dst. Used by the post-loop net-delta
+    // pass (#81): when multiple `when="always"` entries target the
+    // same dst (e.g. overwrite-then-merge-toml on `renri.toml`), each
+    // layer writes intermediate bytes and individually reports
+    // `wrote`, but if the composed final disk content equals the
+    // initial content the user-visible diff is zero — both layers
+    // should then report `unchanged`. `None` means "not on disk at
+    // start"; `Some(_)` means we read this content before any layer
+    // wrote in this run.
+    let mut initial_disk_by_dst: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    // Indices into `actions` per dst, populated alongside each
+    // `actions.push((dst_rel, outcome.kind))`. The post-loop pass
+    // walks groups of size >= 2 (single-entry dsts trust their own
+    // mode's report) and rewrites `Wrote` to `Unchanged` when the
+    // group's net delta is zero. See #81.
+    let mut action_indices_by_dst: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+
     for handle in &handles {
         applied_templates.push(AppliedTemplate {
             source: handle.source_spec.clone(),
@@ -194,10 +214,36 @@ pub async fn apply_to_pj(
 
             let state_key = dst_rel.clone();
 
+            // Snapshot disk state on first encounter with this dst —
+            // before any layer can have written to it in this run.
+            // Drives the post-loop net-delta pass (#81). Safe to read
+            // even for dry-run; the post-loop pass just skips itself
+            // there.
+            //
+            // `is_file()` guard: if the dst is a directory (or any
+            // non-regular special file), `read_existing_text` would
+            // surface a generic I/O error before the per-entry once
+            // path can emit its more helpful "destination exists but
+            // is not a regular file" message. Treat non-files as
+            // "no snapshot, no collapse" and let downstream handling
+            // produce the dedicated error.
+            if !initial_disk_by_dst.contains_key(&state_key) {
+                let initial = if dst_abs.is_file() {
+                    read_existing_text(dst_abs.as_path())?
+                } else {
+                    None
+                };
+                initial_disk_by_dst.insert(state_key.clone(), initial);
+            }
+
             // when = "once" gating
             if spec.when == WhenMode::Once && !opts.force_once {
                 if let Some(state) = applied.files.get(&state_key) {
                     if state.once_applied {
+                        action_indices_by_dst
+                            .entry(state_key.clone())
+                            .or_default()
+                            .push(actions.len());
                         actions.push((dst_rel, OutcomeKind::Skipped));
                         continue;
                     }
@@ -231,6 +277,10 @@ pub async fn apply_to_pj(
                         once_applied_dsts.insert(state_key.clone());
                         wrote_in_run.insert(state_key.clone());
                     }
+                    action_indices_by_dst
+                        .entry(state_key.clone())
+                        .or_default()
+                        .push(actions.len());
                     actions.push((dst_rel, OutcomeKind::Adopted));
                     continue;
                 }
@@ -244,6 +294,10 @@ pub async fn apply_to_pj(
                 if dst_abs.exists() && !wrote_in_run.contains(&state_key) {
                     let msg = format!("destination exists but is not a regular file: {dst_abs}");
                     errors.push((dst_rel.clone(), msg));
+                    action_indices_by_dst
+                        .entry(state_key.clone())
+                        .or_default()
+                        .push(actions.len());
                     actions.push((dst_rel, OutcomeKind::Failed));
                     continue;
                 }
@@ -251,6 +305,10 @@ pub async fn apply_to_pj(
             // when = "manual" is never auto-applied here — Phase 1
             // doesn't expose --file targeting yet.
             if spec.when == WhenMode::Manual {
+                action_indices_by_dst
+                    .entry(state_key.clone())
+                    .or_default()
+                    .push(actions.len());
                 actions.push((dst_rel, OutcomeKind::Skipped));
                 continue;
             }
@@ -258,6 +316,10 @@ pub async fn apply_to_pj(
             // when_expr predicate
             if let Some(expr) = &spec.when_expr {
                 if !eval_truthy(&mut renderer, expr, &ctx)? {
+                    action_indices_by_dst
+                        .entry(state_key.clone())
+                        .or_default()
+                        .push(actions.len());
                     actions.push((dst_rel, OutcomeKind::Skipped));
                     continue;
                 }
@@ -268,6 +330,10 @@ pub async fn apply_to_pj(
                 Ok(s) => s,
                 Err(e) => {
                     errors.push((dst_rel.clone(), format!("read source: {e}")));
+                    action_indices_by_dst
+                        .entry(state_key.clone())
+                        .or_default()
+                        .push(actions.len());
                     actions.push((dst_rel, OutcomeKind::Failed));
                     continue;
                 }
@@ -300,6 +366,10 @@ pub async fn apply_to_pj(
                 Ok(o) => o,
                 Err(e) => {
                     errors.push((dst_rel.clone(), e.to_string()));
+                    action_indices_by_dst
+                        .entry(state_key.clone())
+                        .or_default()
+                        .push(actions.len());
                     actions.push((dst_rel, OutcomeKind::Failed));
                     continue;
                 }
@@ -361,6 +431,10 @@ pub async fn apply_to_pj(
                 }
             }
 
+            action_indices_by_dst
+                .entry(state_key.clone())
+                .or_default()
+                .push(actions.len());
             actions.push((dst_rel, outcome.kind));
             // Drop: ActionContext borrowed `handle` and `spec`.
         }
@@ -378,6 +452,74 @@ pub async fn apply_to_pj(
             fs.once_applied = true;
             applied.record(dst, fs);
         }
+    }
+
+    // 6b. Post-loop: collapse `Wrote` to `Unchanged` for dsts whose
+    //     net delta across all layered entries is zero (#81). Each
+    //     `when="always"` layer reports `Wrote` independently when
+    //     its own byte-compare differs (overwrite clobbers the
+    //     merged disk content; the next layer's merge-toml then
+    //     restores it), but the user-visible effect is no change.
+    //     Reading the dst once more here is cheap and avoids
+    //     restructuring the per-mode `execute` contract.
+    //
+    //     Only runs for dsts with multiple `[[file]]` entries —
+    //     single-entry dsts already report accurately from their
+    //     mode's own byte-compare. Skipped under `--dry-run`
+    //     because no layer actually wrote, and the per-mode plan
+    //     already reflects the net-vs-disk comparison.
+    if !opts.dry_run {
+        for (dst_key, indices) in &action_indices_by_dst {
+            if indices.len() < 2 {
+                continue;
+            }
+            // Nothing to collapse if none of the entries actually
+            // wrote — skip the disk re-read entirely. Common case
+            // when both layers reported `Unchanged` already.
+            let has_wrote = indices.iter().any(|&i| {
+                actions
+                    .get(i)
+                    .is_some_and(|(_, k)| matches!(k, OutcomeKind::Wrote))
+            });
+            if !has_wrote {
+                continue;
+            }
+            let dst_abs = pj_root.join(dst_key);
+            // `is_file()` guard so a dst that ended up as a directory
+            // (impossible via kata's own write path but cheap defence)
+            // surfaces as "no final snapshot" rather than a generic
+            // I/O error.
+            let final_disk = if dst_abs.is_file() {
+                read_existing_text(dst_abs.as_path())?
+            } else {
+                None
+            };
+            let initial = initial_disk_by_dst
+                .get(dst_key)
+                .cloned()
+                .unwrap_or_default();
+            if initial == final_disk {
+                for &i in indices {
+                    if let Some(slot) = actions.get_mut(i) {
+                        if matches!(slot.1, OutcomeKind::Wrote) {
+                            slot.1 = OutcomeKind::Unchanged;
+                        }
+                    }
+                }
+                // If every `Wrote` for this dst collapsed away, the
+                // `applied_at` bookkeeping should also reflect "no
+                // real write happened to this dst". `has_any_write`
+                // stays true if any OTHER dst genuinely wrote; we
+                // only need to clear it when this collapse removed
+                // the last `Wrote` from the run. Cheaper to just
+                // re-derive from the post-collapse actions.
+            }
+        }
+        // Re-derive has_any_write so an all-collapsed run doesn't
+        // bump `applied_at`. After collapse some `Wrote`s may have
+        // become `Unchanged` — the final stamp should reflect the
+        // observable-disk-write truth, not the pre-collapse intent.
+        has_any_write = actions.iter().any(|(_, k)| matches!(k, OutcomeKind::Wrote));
     }
 
     // 7. Write back applied.toml on success (even partial — see
