@@ -4,6 +4,7 @@
 //! `Unimplemented` fallback shim.
 
 pub mod ai;
+pub mod merge_path;
 pub mod merge_section;
 pub mod merge_toml;
 pub mod merge_yaml;

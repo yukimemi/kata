@@ -26,11 +26,27 @@
 //! poke into quoted dotted keys should use `merge-section`
 //! instead, or wait for a future iteration that takes a
 //! TOML-aware path parser.
+//!
+//! **Regex paths (#62)**: a `paths` entry wrapped in `//...//` is
+//! interpreted as a regex against the incoming document's
+//! dotted-path keys (rvpm-style). kata walks every dotted path in
+//! the incoming body, copies each matching path from incoming to
+//! existing, and leaves non-matches alone. Regex and literal
+//! entries can mix in the same list. Example:
+//!
+//! ```toml
+//! paths = [
+//!     "tasks.default",
+//!     "//^tasks\\..+$//",   # sweep every tasks.* without enumerating
+//! ]
+//! ```
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use toml_edit::{DocumentMut, Item, Table};
+
+use super::merge_path::{PathSpec, parse_path_spec, shallowest_matches};
 
 use crate::error::{Error, Result};
 
@@ -125,36 +141,103 @@ fn compute_merged(ctx: &ActionContext<'_>) -> Result<String> {
         ))
     })?;
 
+    // Cache every dotted path present in the incoming doc once —
+    // it's needed any time a regex spec appears, and re-collecting
+    // per regex spec would be wasteful. `OnceCell`-style lazy init
+    // keeps the literal-only fast path zero-cost.
+    let mut incoming_paths: Option<Vec<String>> = None;
+
     for path_str in paths {
-        // Naive `.`-split — module-level docs spell out the
-        // limitation (no TOML-quoted-key awareness). Adding a
-        // proper parser is future work.
-        let segments: Vec<&str> = path_str.split('.').collect();
-        if segments.iter().any(|s| s.is_empty()) {
-            return Err(Error::Merge(format!(
-                "merge-toml: empty segment in path `{path_str}` (e.g. trailing dot)"
-            )));
-        }
-        if let Some(value) = item_at_path(incoming_doc.as_item(), &segments).cloned() {
-            // If the existing file already has the same value at
-            // this path, skip the assignment entirely. toml_edit's
-            // emit after `Table::insert` / value-replace on an
-            // existing key can shuffle the entry relative to
-            // interleaved consumer keys, even when the value
-            // didn't change — kata#34. Comparing serialised forms
-            // (rather than `Item` equality) ignores attached decor
-            // (comments, blank lines, key style) and catches the
-            // pure-no-op case reliably.
-            let already_matches = item_at_path(existing_doc.as_item(), &segments)
-                .is_some_and(|cur| items_equivalent(cur, &value));
-            if !already_matches {
-                set_at_path(&mut existing_doc, &segments, value);
+        match parse_path_spec(path_str)? {
+            PathSpec::Literal(lit) => {
+                copy_one_path(&mut existing_doc, &incoming_doc, &lit)?;
+            }
+            PathSpec::Regex(re) => {
+                let collected = incoming_paths.get_or_insert_with(|| {
+                    let mut out = Vec::new();
+                    collect_dotted_paths(incoming_doc.as_item(), "", &mut out);
+                    out
+                });
+                // Drop child paths when an ancestor also matches:
+                // copying the ancestor already brings the whole
+                // subtree, so iterating over the children would
+                // re-traverse the same data and (more expensively)
+                // re-run `items_equivalent` per leaf — see
+                // gemini's #90 review. Ancestor detection uses
+                // dotted-prefix comparison with an explicit `.`
+                // separator so `tasks` doesn't accidentally swallow
+                // `tasks-clean`.
+                let to_copy = shallowest_matches(collected, &re);
+                for p in &to_copy {
+                    copy_one_path(&mut existing_doc, &incoming_doc, p)?;
+                }
             }
         }
-        // path absent in incoming → leave existing untouched
     }
 
     Ok(existing_doc.to_string())
+}
+
+/// Copy the value at one literal dotted path from `incoming_doc`
+/// into `existing_doc`. Empty segments (e.g. trailing dot, leading
+/// dot, `a..b`) are an error so the manifest author hears about a
+/// malformed path instead of getting a silent no-op. Pure no-ops
+/// (incoming and existing already equivalent at the path) skip the
+/// assignment entirely — see the kata#34 comment below on why
+/// that matters for interleaved consumer keys.
+fn copy_one_path(
+    existing_doc: &mut DocumentMut,
+    incoming_doc: &DocumentMut,
+    path_str: &str,
+) -> Result<()> {
+    // Naive `.`-split — module-level docs spell out the
+    // limitation (no TOML-quoted-key awareness). Adding a
+    // proper parser is future work.
+    let segments: Vec<&str> = path_str.split('.').collect();
+    if segments.iter().any(|s| s.is_empty()) {
+        return Err(Error::Merge(format!(
+            "merge-toml: empty segment in path `{path_str}` (e.g. trailing dot)"
+        )));
+    }
+    if let Some(value) = item_at_path(incoming_doc.as_item(), &segments).cloned() {
+        // If the existing file already has the same value at
+        // this path, skip the assignment entirely. toml_edit's
+        // emit after `Table::insert` / value-replace on an
+        // existing key can shuffle the entry relative to
+        // interleaved consumer keys, even when the value
+        // didn't change — kata#34. Comparing serialised forms
+        // (rather than `Item` equality) ignores attached decor
+        // (comments, blank lines, key style) and catches the
+        // pure-no-op case reliably.
+        let already_matches = item_at_path(existing_doc.as_item(), &segments)
+            .is_some_and(|cur| items_equivalent(cur, &value));
+        if !already_matches {
+            set_at_path(existing_doc, &segments, value);
+        }
+    }
+    // path absent in incoming → leave existing untouched
+    Ok(())
+}
+
+/// Recursively collect every dotted path in `item`, recording both
+/// intermediate tables (so a regex like `^tasks$` can hit the
+/// `tasks` super-key) and their leaves (so `^tasks\..+$` works).
+/// `prefix` is the dotted-path traversed so far ("" at top level).
+fn collect_dotted_paths(item: &Item, prefix: &str, out: &mut Vec<String>) {
+    let Some(table) = item.as_table() else {
+        return;
+    };
+    for (key, value) in table.iter() {
+        let path = if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        out.push(path.clone());
+        if value.is_table() {
+            collect_dotted_paths(value, &path, out);
+        }
+    }
 }
 
 /// Compare two `Item`s for the kata#34 "skip if no-op" gate.
@@ -278,10 +361,22 @@ mod tests {
             Some(existing) => {
                 let mut existing_doc: DocumentMut = existing.parse().unwrap();
                 let incoming_doc: DocumentMut = incoming.parse().unwrap();
+                let mut incoming_paths: Option<Vec<String>> = None;
                 for path_str in &paths_owned {
-                    let segments: Vec<&str> = path_str.split('.').collect();
-                    if let Some(v) = item_at_path(incoming_doc.as_item(), &segments).cloned() {
-                        set_at_path(&mut existing_doc, &segments, v);
+                    match parse_path_spec(path_str).unwrap() {
+                        PathSpec::Literal(lit) => {
+                            copy_one_path(&mut existing_doc, &incoming_doc, &lit).unwrap();
+                        }
+                        PathSpec::Regex(re) => {
+                            let collected = incoming_paths.get_or_insert_with(|| {
+                                let mut out = Vec::new();
+                                collect_dotted_paths(incoming_doc.as_item(), "", &mut out);
+                                out
+                            });
+                            for p in &shallowest_matches(collected, &re) {
+                                copy_one_path(&mut existing_doc, &incoming_doc, p).unwrap();
+                            }
+                        }
                     }
                 }
                 existing_doc.to_string()
@@ -447,6 +542,98 @@ args = [\"test\", \"--all-targets\"]
         assert!(
             !merged.contains("[package]") && !merged.contains("name = \"new\""),
             "no fresh [package] table should appear: {merged}"
+        );
+    }
+
+    #[test]
+    fn regex_path_sweeps_all_tasks_subkeys() {
+        // Issue #62 motivating case: pj-rust's Makefile.toml ships
+        // tasks.{default,check,fmt-check,fmt,clippy,test,
+        // test-targets,test-doc,lock-check,...}. Listing each name
+        // by hand is error-prone — every new sub-task added
+        // upstream needs an explicit append to the consumer's
+        // `paths`. A single `//^tasks\..+$//` regex sweeps the
+        // entire subtree.
+        let existing = "\
+[tasks.default]
+deps = [\"old\"]
+
+[tasks.test]
+args = [\"old-args\"]
+";
+        let incoming = "\
+[tasks.default]
+deps = [\"check\"]
+
+[tasks.test]
+args = [\"test\", \"--all-targets\"]
+
+[tasks.test-doc]
+args = [\"test\", \"--doc\"]
+";
+        let merged = merge(Some(existing), incoming, &[r"//^tasks\..+$//"]);
+        assert!(
+            merged.contains("deps = [\"check\"]"),
+            "regex must update tasks.default: {merged}"
+        );
+        assert!(
+            merged.contains("test-doc") && merged.contains("--doc"),
+            "regex must also pull in tasks.test-doc (new sub-key): {merged}"
+        );
+    }
+
+    #[test]
+    fn regex_and_literal_paths_compose() {
+        // A regex and literal entries in the same `paths` list
+        // should both fire. The literal-only path should remain
+        // unaffected by regex matches that don't cover it.
+        let existing = "\
+[a]
+keep_a = 1
+
+[b]
+keep_b = 2
+";
+        let incoming = "\
+[a]
+keep_a = 99
+
+[b]
+keep_b = 88
+nested = \"new\"
+";
+        let merged = merge(Some(existing), incoming, &["a.keep_a", r"//^b\..+$//"]);
+        assert!(merged.contains("keep_a = 99"), "literal: {merged}");
+        assert!(merged.contains("keep_b = 88"), "regex hit keep_b: {merged}");
+        assert!(
+            merged.contains("nested = \"new\""),
+            "regex hit nested: {merged}"
+        );
+    }
+
+    #[test]
+    fn regex_skips_paths_not_in_incoming() {
+        // A regex matches the names of keys that EXIST in the
+        // incoming body. The existing file may have keys the
+        // regex would also match if it appeared in incoming, but
+        // those stay untouched (same "no implicit prune" rule as
+        // literal paths).
+        let existing = "\
+[tasks.only_in_existing]
+note = \"keep\"
+";
+        let incoming = "\
+[tasks.only_in_incoming]
+note = \"add\"
+";
+        let merged = merge(Some(existing), incoming, &[r"//^tasks\..+$//"]);
+        assert!(
+            merged.contains("only_in_existing") && merged.contains("note = \"keep\""),
+            "existing-only key must survive regex sweep: {merged}"
+        );
+        assert!(
+            merged.contains("only_in_incoming") && merged.contains("note = \"add\""),
+            "incoming-only key (matching regex) must be added: {merged}"
         );
     }
 }
