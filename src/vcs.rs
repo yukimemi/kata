@@ -64,6 +64,135 @@ fn is_kata_owned(path: &str) -> bool {
     false
 }
 
+/// Fast-forward `dir`'s current branch from its tracked remote
+/// (#94, the `--pull` half of the `kata apply --all` ergonomics).
+/// `--ff-only` is intentional: if local commits diverge from the
+/// remote, the consumer's working state is in a shape kata
+/// shouldn't try to auto-merge — surface the failure and let the
+/// per-PJ error path report it.
+///
+/// Like [`dirty_files`], `Ok(None)` means "not a git repo (or no
+/// upstream)" — the apply --all caller treats that as
+/// "nothing to pull, fall through". Real errors (non-fast-forward,
+/// network failure, `git` missing) come back as `Err`.
+pub async fn pull_ff(dir: &Utf8Path) -> Result<Option<()>> {
+    let output = Command::new("git")
+        .current_dir(dir.as_std_path())
+        .args(["pull", "--ff-only"])
+        .output()
+        .await
+        .map_err(|e| Error::Git(format!("spawn `git pull` in {dir}: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if stderr.contains("not a git repository") {
+            return Ok(None);
+        }
+        // Common stderr fragments for "no upstream configured":
+        //   "There is no tracking information for the current branch."
+        //   "No remote repository specified."
+        // Treat both as "nothing to pull" — the PJ is local-only
+        // and apply should still proceed.
+        if stderr.contains("no tracking information")
+            || stderr.contains("No remote repository specified")
+        {
+            return Ok(None);
+        }
+        return Err(Error::Git(format!("git pull in {dir}: {}", stderr.trim())));
+    }
+    Ok(Some(()))
+}
+
+/// Stage the given paths and create a commit with `msg` in `dir`.
+/// Returns `Ok(false)` when nothing was actually committed (every
+/// listed path was already in the index without changes — the
+/// usual case when the apply was a pure no-op), so callers can
+/// short-circuit the follow-up `git push`.
+///
+/// Only the paths kata wrote in this run are staged; unrelated
+/// consumer WIP in the working tree is intentionally NOT included
+/// so a `--allow-dirty` apply still keeps the kata commit and
+/// the consumer's WIP separate.
+pub async fn commit_paths(dir: &Utf8Path, paths: &[String], msg: &str) -> Result<bool> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    // Stage each kata-touched path explicitly. `--` separates
+    // paths from options the same way other shell-outs in this
+    // crate do, and `git add -A -- <paths>` is intentional: `-A`
+    // also picks up deletions, which can happen when a template
+    // stops shipping a file. The paths list comes from kata's
+    // own runner, so it's never user-attacker-controllable.
+    let mut add = Command::new("git");
+    add.current_dir(dir.as_std_path()).args(["add", "-A", "--"]);
+    for p in paths {
+        add.arg(p);
+    }
+    let output = add
+        .output()
+        .await
+        .map_err(|e| Error::Git(format!("spawn `git add` in {dir}: {e}")))?;
+    if !output.status.success() {
+        return Err(Error::Git(format!(
+            "git add in {dir}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    // `--allow-empty=false` is git's default. Detect a no-op
+    // commit BEFORE invoking it so we don't return a spurious
+    // success when there's nothing to record. `diff --cached
+    // --quiet` exits 0 when the index matches HEAD (= nothing
+    // staged), 1 when there's a delta.
+    let cached = Command::new("git")
+        .current_dir(dir.as_std_path())
+        .args(["diff", "--cached", "--quiet"])
+        .status()
+        .await
+        .map_err(|e| Error::Git(format!("spawn `git diff --cached` in {dir}: {e}")))?;
+    if cached.success() {
+        // Nothing to commit. Not an error — apply genuinely
+        // produced no on-disk delta.
+        return Ok(false);
+    }
+
+    let output = Command::new("git")
+        .current_dir(dir.as_std_path())
+        .args(["commit", "-m", msg])
+        .output()
+        .await
+        .map_err(|e| Error::Git(format!("spawn `git commit` in {dir}: {e}")))?;
+    if !output.status.success() {
+        return Err(Error::Git(format!(
+            "git commit in {dir}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(true)
+}
+
+/// Push the current branch in `dir` to its tracked upstream.
+/// `Ok(false)` when no upstream is configured (the PJ is
+/// local-only) so the caller can log a warning instead of
+/// surfacing an error — matching `pull_ff`'s
+/// "missing-upstream is not a hard failure" stance.
+pub async fn push_current(dir: &Utf8Path) -> Result<bool> {
+    let output = Command::new("git")
+        .current_dir(dir.as_std_path())
+        .arg("push")
+        .output()
+        .await
+        .map_err(|e| Error::Git(format!("spawn `git push` in {dir}: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if stderr.contains("no upstream") || stderr.contains("does not match any") {
+            return Ok(false);
+        }
+        return Err(Error::Git(format!("git push in {dir}: {}", stderr.trim())));
+    }
+    Ok(true)
+}
+
 /// Inspect `dir` for uncommitted user work. Returns a list of
 /// relative paths the user has modified / added / removed, with
 /// kata-owned bookkeeping filtered out. Empty vec means clean.
