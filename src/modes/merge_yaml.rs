@@ -23,6 +23,12 @@
 //! mode for files where the value matters and the formatting
 //! doesn't (typical YAML config). For files where format / order
 //! / comments DO matter, write a `merge-section` block instead.
+//!
+//! **Regex paths (#62)**: identical rule to `merge-toml` — a
+//! `paths` entry wrapped in `//...//` is parsed as a regex against
+//! the incoming document's dotted-path keys, and any matching path
+//! is copied from incoming to existing. Mixes freely with literal
+//! paths.
 
 use std::path::PathBuf;
 
@@ -31,6 +37,7 @@ use serde_yaml::{Mapping, Value};
 
 use crate::error::{Error, Result};
 
+use super::merge_path::{PathSpec, parse_path_spec};
 use super::{
     ActionContext, ActionOutcome, ActionPlan, ApplyMode, OutcomeKind, PlanKind, unified_diff,
 };
@@ -119,17 +126,26 @@ fn compute_merged(ctx: &ActionContext<'_>) -> Result<String> {
         ))
     })?;
 
+    let mut incoming_paths: Option<Vec<String>> = None;
+
     for path_str in paths {
-        let segments: Vec<&str> = path_str.split('.').collect();
-        if segments.iter().any(|s| s.is_empty()) {
-            return Err(Error::Merge(format!(
-                "merge-yaml: empty segment in path `{path_str}` (e.g. trailing dot)"
-            )));
+        match parse_path_spec(path_str)? {
+            PathSpec::Literal(lit) => {
+                copy_one_path(&mut existing_val, &incoming_val, &lit)?;
+            }
+            PathSpec::Regex(re) => {
+                let collected = incoming_paths.get_or_insert_with(|| {
+                    let mut out = Vec::new();
+                    collect_dotted_paths(&incoming_val, "", &mut out);
+                    out
+                });
+                for p in collected.iter() {
+                    if re.is_match(p) {
+                        copy_one_path(&mut existing_val, &incoming_val, p)?;
+                    }
+                }
+            }
         }
-        if let Some(value) = value_at_path(&incoming_val, &segments).cloned() {
-            set_at_path(&mut existing_val, &segments, value);
-        }
-        // path absent in incoming → leave existing untouched
     }
 
     serde_yaml::to_string(&existing_val).map_err(|e| {
@@ -138,6 +154,45 @@ fn compute_merged(ctx: &ActionContext<'_>) -> Result<String> {
             ctx.dst_abs
         ))
     })
+}
+
+/// Copy the value at one literal dotted path from `incoming_val`
+/// into `existing_val`. Mirrors `merge-toml::copy_one_path`.
+fn copy_one_path(existing_val: &mut Value, incoming_val: &Value, path_str: &str) -> Result<()> {
+    let segments: Vec<&str> = path_str.split('.').collect();
+    if segments.iter().any(|s| s.is_empty()) {
+        return Err(Error::Merge(format!(
+            "merge-yaml: empty segment in path `{path_str}` (e.g. trailing dot)"
+        )));
+    }
+    if let Some(value) = value_at_path(incoming_val, &segments).cloned() {
+        set_at_path(existing_val, &segments, value);
+    }
+    Ok(())
+}
+
+/// Recursively enumerate every dotted path in `val` — intermediate
+/// mappings AND their leaves — so a regex spec can match either a
+/// super-key (`^server$`) or a child (`^server\..+$`). Mirrors
+/// `merge-toml::collect_dotted_paths` for the YAML data model.
+fn collect_dotted_paths(val: &Value, prefix: &str, out: &mut Vec<String>) {
+    let Some(map) = val.as_mapping() else {
+        return;
+    };
+    for (key, value) in map {
+        let Some(key_str) = key.as_str() else {
+            continue;
+        };
+        let path = if prefix.is_empty() {
+            key_str.to_string()
+        } else {
+            format!("{prefix}.{key_str}")
+        };
+        out.push(path.clone());
+        if value.is_mapping() {
+            collect_dotted_paths(value, &path, out);
+        }
+    }
 }
 
 /// Walk a dotted path through nested `Mapping`s and return the
@@ -212,10 +267,24 @@ mod tests {
             Some(existing) => {
                 let mut existing_val: Value = serde_yaml::from_str(existing).unwrap();
                 let incoming_val: Value = serde_yaml::from_str(incoming).unwrap();
+                let mut incoming_paths: Option<Vec<String>> = None;
                 for path_str in paths {
-                    let segments: Vec<&str> = path_str.split('.').collect();
-                    if let Some(v) = value_at_path(&incoming_val, &segments).cloned() {
-                        set_at_path(&mut existing_val, &segments, v);
+                    match parse_path_spec(path_str).unwrap() {
+                        PathSpec::Literal(lit) => {
+                            copy_one_path(&mut existing_val, &incoming_val, &lit).unwrap();
+                        }
+                        PathSpec::Regex(re) => {
+                            let collected = incoming_paths.get_or_insert_with(|| {
+                                let mut out = Vec::new();
+                                collect_dotted_paths(&incoming_val, "", &mut out);
+                                out
+                            });
+                            for p in collected.iter() {
+                                if re.is_match(p) {
+                                    copy_one_path(&mut existing_val, &incoming_val, p).unwrap();
+                                }
+                            }
+                        }
                     }
                 }
                 serde_yaml::to_string(&existing_val).unwrap()
@@ -308,5 +377,61 @@ b:
         let v: Value = serde_yaml::from_str(&merged).unwrap();
         // `package` is still the original scalar
         assert_eq!(v["package"], Value::String("as-a-string".into()));
+    }
+
+    #[test]
+    fn regex_path_sweeps_all_server_subkeys() {
+        // Issue #62 — same rvpm-style `//pattern//` form merge-toml
+        // accepts. A single regex replaces every named entry under
+        // `server.*` without enumerating each one.
+        let existing = "\
+server:
+  host: localhost
+  port: 8080
+logging:
+  level: info
+";
+        let incoming = "\
+server:
+  host: prod.example.com
+  port: 443
+  tls: true
+logging:
+  level: debug
+";
+        let merged = merge(Some(existing), incoming, &[r"//^server\..+$//"]);
+        let v: Value = serde_yaml::from_str(&merged).unwrap();
+        assert_eq!(
+            v["server"]["host"],
+            Value::String("prod.example.com".into())
+        );
+        assert_eq!(v["server"]["port"], Value::Number(443.into()));
+        assert_eq!(v["server"]["tls"], Value::Bool(true));
+        // Logging path was NOT in the regex — should keep `info`.
+        assert_eq!(v["logging"]["level"], Value::String("info".into()));
+    }
+
+    #[test]
+    fn regex_and_literal_paths_compose() {
+        // Same composition test as merge-toml: one regex + one
+        // literal in the same list both fire.
+        let existing = "\
+a:
+  keep_a: 1
+b:
+  keep_b: 2
+";
+        let incoming = "\
+a:
+  keep_a: 99
+b:
+  keep_b: 88
+  nested: new
+";
+        let merged = merge(Some(existing), incoming, &["a.keep_a", r"//^b\..+$//"]);
+        let v: Value = serde_yaml::from_str(&merged).unwrap();
+        assert_eq!(v["a"]["keep_a"], Value::Number(99.into()));
+        assert_eq!(v["b"]["keep_b"], Value::Number(88.into()));
+        assert_eq!(v["b"]["nested"], Value::String("new".into()));
     }
 }
