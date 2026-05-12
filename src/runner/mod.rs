@@ -277,9 +277,7 @@ pub async fn apply_to_pj(
             // for this path" is honoured. The post-loop pass still
             // re-stamps `once_applied = true` because the entry's
             // mode runs and lands in `once_applied_dsts`. See #82.
-            if spec.when == WhenMode::Once
-                && !opts.force_once
-                && !opts.reseed.contains(&state_key)
+            if spec.when == WhenMode::Once && !opts.force_once && !opts.reseed.contains(&state_key)
             {
                 if let Some(state) = applied.files.get(&state_key) {
                     if state.once_applied {
