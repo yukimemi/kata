@@ -755,29 +755,47 @@ pub async fn plan_pj(
 /// early). Templates that need a Tera-templated `dst` will silently
 /// skip; that's the right behaviour for now.
 fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table> {
-    const VARS_FILE_REL: &str = ".kata/vars.toml";
     let mut seed = toml::Table::new();
+    // Each layer ships its own `vars.toml` (#86: also `vars.<layer>.toml`).
+    // We pull every `[[file]]` whose dst lands inside `.kata/` and
+    // matches the vars-file naming rule (`vars.toml` or
+    // `vars.<name>.toml`). Layered seeds compose across templates in
+    // compose order, and within one template every `vars.<X>.toml`
+    // alphabetically followed by `vars.toml` last — same
+    // ordering rule the consumer-side `load_vars_file` uses
+    // (see `VarSources::load_vars_file` doc).
     for handle in handles {
-        for spec in &handle.manifest.files {
-            // Compute the effective dst the same way the apply loop
-            // does for literal cases. (See `render_dst` for the Tera
-            // path — we deliberately don't render here.)
-            let effective_dst: std::borrow::Cow<'_, str> = match &spec.dst {
-                Some(d) => std::borrow::Cow::Borrowed(d.as_str()),
-                None => std::borrow::Cow::Borrowed(
-                    spec.src.strip_suffix(".tera").unwrap_or(spec.src.as_str()),
-                ),
-            };
-            if effective_dst != VARS_FILE_REL {
-                continue;
+        let mut layer_specs: Vec<&crate::manifest::FileSpec> = handle
+            .manifest
+            .files
+            .iter()
+            .filter(|spec| spec_is_vars_seed(spec))
+            .collect();
+        // `vars.toml` goes last so its deep-merge wins on a
+        // leaf-key conflict regardless of layer-name first letter.
+        // Plain `sort_by_key` on the path can't enforce this on
+        // its own (e.g. `vars.web.toml` would lex-sort after
+        // `vars.toml`). See #93.
+        layer_specs.sort_by(|a, b| {
+            let dst_a = a.dst_or_src();
+            let dst_b = b.dst_or_src();
+            let is_bare_a = dst_a.ends_with("/vars.toml") || dst_a == "vars.toml";
+            let is_bare_b = dst_b.ends_with("/vars.toml") || dst_b == "vars.toml";
+            match (is_bare_a, is_bare_b) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => dst_a.cmp(dst_b),
             }
-            // Same security check as the apply loop (line ~171) —
-            // refuse template-supplied paths that try to escape the
+        });
+        for spec in layer_specs {
+            // Same security check as the apply loop — refuse
+            // template-supplied paths that try to escape the
             // template root. `collect_template_seed_vars` runs
             // BEFORE the apply loop's check, so without this a
-            // hostile / buggy manifest could read e.g. `../../etc/passwd`
-            // via a `[[file]] src = "../etc/passwd", dst =
-            // ".kata/vars.toml"` declaration.
+            // hostile / buggy manifest could read e.g.
+            // `../../etc/passwd` via a `[[file]] src =
+            // "../etc/passwd", dst = ".kata/vars.toml"` declaration.
             check_relative_contained(&spec.src, "template src")?;
             let src_abs = handle.root.join(&spec.src);
             let content = match std::fs::read_to_string(src_abs.as_std_path()) {
@@ -791,6 +809,71 @@ fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table>
         }
     }
     Ok(seed)
+}
+
+/// True when a file-spec ships an entry that lands inside `.kata/`
+/// with a name matching the vars-file pattern. Used by
+/// [`collect_template_seed_vars`] to pull every per-layer seed.
+/// Reuses `FileSpec::dst_or_src()` so the effective-dst logic
+/// stays in one place (no parallel implementation to drift).
+///
+/// The dst string is normalised before the prefix check so that
+/// `./.kata/vars.toml` or `foo/../.kata/vars.web.toml` are
+/// recognised as vars seeds — both forms resolve into `.kata/`
+/// at apply time anyway, and treating them inconsistently here
+/// would make first-run template seeding differ from
+/// subsequent runs (when kata reads the written file from disk).
+/// See PR #93 review.
+fn spec_is_vars_seed(spec: &crate::manifest::FileSpec) -> bool {
+    use crate::render::vars::{KATA_DIR_REL, matches_vars_pattern};
+    let normalized = normalize_relative_path(spec.dst_or_src());
+    let prefix = format!("{KATA_DIR_REL}/");
+    let Some(name) = normalized.strip_prefix(prefix.as_str()) else {
+        return false;
+    };
+    // Reject any further sub-directory under `.kata/` (e.g.
+    // `.kata/sub/vars.toml`) — kata's bookkeeping lives flat.
+    if name.contains('/') {
+        return false;
+    }
+    matches_vars_pattern(name)
+}
+
+/// Collapse `.` / `..` components in a relative path without
+/// touching the filesystem. Mixed `/` and `\` separators both
+/// fold into `/` for the comparison, so a template author can
+/// write the dst in either convention.
+///
+/// Returns an empty string if the path tries to escape the root
+/// (more `..` than non-`..` components). `spec_is_vars_seed` then
+/// drops the entry because the empty string won't `strip_prefix(".kata/")`.
+fn normalize_relative_path(s: &str) -> String {
+    use std::path::{Component, Path, PathBuf};
+    let unified: String = s.chars().map(|c| if c == '\\' { '/' } else { c }).collect();
+    let mut buf = PathBuf::new();
+    for c in Path::new(&unified).components() {
+        match c {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                if !buf.pop() {
+                    // Escapes the root — caller's `strip_prefix(".kata/")`
+                    // will fail, which is the right behaviour for
+                    // `../etc/passwd`-style attempts.
+                    return String::new();
+                }
+            }
+            Component::Normal(seg) => buf.push(seg),
+            Component::RootDir | Component::Prefix(_) => {
+                // Absolute paths are rejected by the apply loop
+                // anyway (`check_relative_contained`); returning
+                // empty here means `spec_is_vars_seed` returns
+                // false rather than matching against the unsafe
+                // input.
+                return String::new();
+            }
+        }
+    }
+    buf.to_string_lossy().replace('\\', "/")
 }
 
 /// Centralised so `apply_to_pj` and `plan_pj` cannot drift.
