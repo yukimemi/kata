@@ -144,13 +144,17 @@ impl VarSources {
     /// is read independently; `vars.toml` keeps the historic
     /// single-file role.
     ///
-    /// Discovery + merge order: alphabetical by filename. With the
-    /// usual yukimemi layer names this orders e.g. `vars.react.toml`
-    /// then `vars.rust.toml` then `vars.toml` — `vars.toml`
-    /// (no middle segment) sorts after every `vars.X.toml` because
-    /// `vars.` < `vars.X` lexicographically, so the bare base file
-    /// wins on a leaf-key conflict (its deep-merge happens last).
-    /// Single-file PJs land on the original behaviour unchanged.
+    /// Discovery + merge order: every `vars.<name>.toml` first in
+    /// alphabetical order, then `vars.toml` last. Putting the
+    /// bare base file last guarantees its deep-merge runs after
+    /// every layered file and therefore wins on any leaf-key
+    /// conflict — that's the historic single-file pinning
+    /// semantic preserved across the layered form. Plain
+    /// alphabetical sort can't do this on its own because the
+    /// ordering between `vars.toml` and `vars.<X>.toml` flips on
+    /// whether the layer-name's first char is below or above 't'
+    /// (`vars.react.toml` < `vars.toml` < `vars.web.toml`), so an
+    /// explicit "vars.toml goes last" rule is required.
     ///
     /// Missing `.kata` directory is not an error (vars.toml is
     /// opt-in). A present-but-malformed file is a hard error so
@@ -176,11 +180,20 @@ impl VarSources {
                 paths.push(path);
             }
         }
-        // Alphabetical so the merge order is deterministic across
-        // platforms (read_dir is not). See the module-level doc on
-        // ordering — bare `vars.toml` sorts last and therefore wins
-        // on a leaf-key conflict.
-        paths.sort();
+        // Custom sort: every `vars.<X>.toml` alphabetically, then
+        // `vars.toml` last so the bare base file wins on a leaf-key
+        // conflict regardless of layer-name first letter (see doc
+        // above).
+        paths.sort_by(|a, b| {
+            let name_a = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let name_b = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            match (name_a == "vars.toml", name_b == "vars.toml") {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => name_a.cmp(name_b),
+            }
+        });
 
         let mut merged = toml::Table::new();
         for path in paths {
@@ -691,9 +704,9 @@ mod tests {
 
     #[test]
     fn load_vars_file_bare_vars_toml_wins_on_leaf_conflict() {
-        // The alphabetical order chosen for merging means
-        // `vars.<X>.toml` is merged BEFORE `vars.toml` (because
-        // `vars.` < `vars.X` lexicographically). On a leaf-key
+        // The explicit "vars.toml is sorted last" rule means
+        // `vars.<X>.toml` is always merged BEFORE `vars.toml`,
+        // regardless of layer-name first letter. On a leaf-key
         // conflict, the bare `vars.toml` therefore wins — which
         // is the historic single-file behaviour for PJs that pin
         // values in the consumer-owned `vars.toml`.
@@ -712,6 +725,34 @@ mod tests {
         .unwrap();
         let out = VarSources::load_vars_file(root).unwrap();
         assert_eq!(out["version"].as_str(), Some("consumer-pinned"));
+    }
+
+    #[test]
+    fn load_vars_file_bare_vars_toml_wins_even_when_layer_name_sorts_after_t() {
+        // Regression for the issue gemini-code-assist flagged on
+        // PR #93: plain alphabetical sort would put `vars.web.toml`
+        // AFTER `vars.toml` (because 'w' > 't'), making the layer
+        // overwrite the consumer-pinned base. The custom sort
+        // pins `vars.toml` last so the consumer always wins.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join(".kata")).unwrap();
+        std::fs::write(
+            root.join(".kata/vars.web.toml"),
+            "version = \"layer-web\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".kata/vars.toml"),
+            "version = \"consumer-pinned\"\n",
+        )
+        .unwrap();
+        let out = VarSources::load_vars_file(root).unwrap();
+        assert_eq!(
+            out["version"].as_str(),
+            Some("consumer-pinned"),
+            "`vars.toml` must win on leaf-key conflict regardless of layer-name first letter",
+        );
     }
 
     #[test]

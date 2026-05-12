@@ -618,8 +618,10 @@ fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table>
     // We pull every `[[file]]` whose dst lands inside `.kata/` and
     // matches the vars-file naming rule (`vars.toml` or
     // `vars.<name>.toml`). Layered seeds compose across templates in
-    // compose order, and within one template alphabetically — same
-    // ordering rule the consumer-side discovery uses.
+    // compose order, and within one template every `vars.<X>.toml`
+    // alphabetically followed by `vars.toml` last — same
+    // ordering rule the consumer-side `load_vars_file` uses
+    // (see `VarSources::load_vars_file` doc).
     for handle in handles {
         let mut layer_specs: Vec<&crate::manifest::FileSpec> = handle
             .manifest
@@ -627,10 +629,23 @@ fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table>
             .iter()
             .filter(|spec| spec_is_vars_seed(spec))
             .collect();
-        // Stable within a single template so re-ordering the
-        // `[[file]]` array in the manifest doesn't change which
-        // value wins on a leaf-key conflict.
-        layer_specs.sort_by_key(|spec| effective_dst_of(spec).to_string());
+        // `vars.toml` goes last so its deep-merge wins on a
+        // leaf-key conflict regardless of layer-name first letter.
+        // Plain `sort_by_key` on the path can't enforce this on
+        // its own (e.g. `vars.web.toml` would lex-sort after
+        // `vars.toml`). See #93.
+        layer_specs.sort_by(|a, b| {
+            let dst_a = a.dst_or_src();
+            let dst_b = b.dst_or_src();
+            let is_bare_a = dst_a.ends_with("/vars.toml") || dst_a == "vars.toml";
+            let is_bare_b = dst_b.ends_with("/vars.toml") || dst_b == "vars.toml";
+            match (is_bare_a, is_bare_b) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => dst_a.cmp(dst_b),
+            }
+        });
         for spec in layer_specs {
             // Same security check as the apply loop — refuse
             // template-supplied paths that try to escape the
@@ -657,9 +672,11 @@ fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table>
 /// True when a file-spec ships an entry that lands inside `.kata/`
 /// with a name matching the vars-file pattern. Used by
 /// [`collect_template_seed_vars`] to pull every per-layer seed.
+/// Reuses `FileSpec::dst_or_src()` so the effective-dst logic
+/// stays in one place (no parallel implementation to drift).
 fn spec_is_vars_seed(spec: &crate::manifest::FileSpec) -> bool {
     use crate::render::vars::{KATA_DIR_REL, matches_vars_pattern};
-    let dst = effective_dst_of(spec);
+    let dst = spec.dst_or_src();
     let prefix = format!("{KATA_DIR_REL}/");
     let Some(name) = dst.strip_prefix(prefix.as_str()) else {
         return false;
@@ -670,18 +687,6 @@ fn spec_is_vars_seed(spec: &crate::manifest::FileSpec) -> bool {
         return false;
     }
     matches_vars_pattern(name)
-}
-
-/// Compute the effective destination the same way the apply loop
-/// does for literal cases — Tera-templated dsts are skipped (we
-/// don't have a render context this early). Out-of-line so
-/// `collect_template_seed_vars` can call it for both its filter
-/// and its alphabetical sort key.
-fn effective_dst_of(spec: &crate::manifest::FileSpec) -> &str {
-    match &spec.dst {
-        Some(d) => d.as_str(),
-        None => spec.src.strip_suffix(".tera").unwrap_or(spec.src.as_str()),
-    }
 }
 
 /// Centralised so `apply_to_pj` and `plan_pj` cannot drift.
