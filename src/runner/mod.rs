@@ -155,6 +155,24 @@ pub async fn apply_to_pj(
     let mut applied_templates: Vec<AppliedTemplate> = Vec::new();
     let mut has_any_write = false;
 
+    // Dst paths that should be marked `once_applied = true` at the
+    // END of this apply run, deferred from the per-entry write site.
+    // The deferral is what makes `when = "once"` compose across
+    // multiple `[[file]]` entries targeting the same dst (e.g.
+    // pj-base's overwrite-seed of `.kata/vars.toml` plus pj-rust's
+    // merge-toml additions). If the flag were set mid-loop the
+    // second entry's gate check would skip it. See #85.
+    let mut once_applied_dsts: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Dst paths kata has already written (or unchanged-recorded) in
+    // THIS apply run. Used to disambiguate the once-entry adoption
+    // path: "file exists on disk" means "consumer brought it" only
+    // when kata didn't write it earlier in the same run. Without
+    // this guard, a second when=once entry to the same dst hits
+    // adoption-when-file-exists instead of running its mode (e.g.
+    // merge-toml), defeating composition. See #85.
+    let mut wrote_in_run: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for handle in &handles {
         applied_templates.push(AppliedTemplate {
             source: handle.source_spec.clone(),
@@ -187,17 +205,31 @@ pub async fn apply_to_pj(
                 // Adoption flow: kata is being introduced into a project
                 // that already has a file matching this once-entry.
                 // Treat the on-disk content as the consumer's chosen
-                // "once" — record `once_applied = true` and move on
+                // "once" — record content_hash cleared and move on
                 // without overwriting. `content_hash` is explicitly
                 // cleared (not just left at default) so a stale hash
                 // from an older kata version that did record once
                 // hashes can't sneak through and trip drift detection.
-                if dst_abs.is_file() {
+                //
+                // The `once_applied = true` flag is deferred to the
+                // post-loop pass so multiple entries targeting the same
+                // dst (e.g. an adoption from one layer plus a
+                // merge-toml from another) all run in this apply
+                // before any of them locks out the next. See #85.
+                //
+                // Skip adoption when kata wrote this dst earlier in
+                // the current run: the file exists because pj-base
+                // just seeded it, not because the consumer pre-staged
+                // it. Falling through lets the second entry's mode
+                // run its actual logic (e.g. pj-rust's merge-toml
+                // additions on top of pj-base's seed).
+                if dst_abs.is_file() && !wrote_in_run.contains(&state_key) {
                     if !opts.dry_run {
                         let mut fs = applied.files.get(&state_key).cloned().unwrap_or_default();
-                        fs.once_applied = true;
                         fs.content_hash = None;
                         applied.record(&state_key, fs);
+                        once_applied_dsts.insert(state_key.clone());
+                        wrote_in_run.insert(state_key.clone());
                     }
                     actions.push((dst_rel, OutcomeKind::Adopted));
                     continue;
@@ -206,8 +238,10 @@ pub async fn apply_to_pj(
                 // a directory or non-regular special file). Refuse
                 // rather than `once_applied`-marking it — adopting
                 // would permanently mask an invalid template
-                // destination shape.
-                if dst_abs.exists() {
+                // destination shape. Only applies to pre-existing
+                // non-regular files; if kata itself wrote the dst
+                // earlier in this run it's already a regular file.
+                if dst_abs.exists() && !wrote_in_run.contains(&state_key) {
                     let msg = format!("destination exists but is not a regular file: {dst_abs}");
                     errors.push((dst_rel.clone(), msg));
                     actions.push((dst_rel, OutcomeKind::Failed));
@@ -291,9 +325,8 @@ pub async fn apply_to_pj(
             // guard and drift detection).
             if !opts.dry_run && matches!(outcome.kind, OutcomeKind::Wrote | OutcomeKind::Unchanged)
             {
-                let once_applied = matches!(spec.when, WhenMode::Once);
+                let is_once = matches!(spec.when, WhenMode::Once);
                 let mut fs = applied.files.get(&state_key).cloned().unwrap_or_default();
-                fs.once_applied = fs.once_applied || once_applied;
                 // `once` files are consumer-owned after the first
                 // write — don't track their content_hash so `kata
                 // status` doesn't emit drift noise on every later
@@ -303,12 +336,24 @@ pub async fn apply_to_pj(
                 // any pre-existing hash on the once branch so a
                 // forced re-apply (`force_once`) over a previously
                 // hashed entry doesn't leave a stale value behind.
-                if once_applied {
+                if is_once {
                     fs.content_hash = None;
                 } else {
                     fs.content_hash = Some(hash_content(action_ctx.rendered_body.as_bytes()));
                 }
                 applied.record(&state_key, fs);
+                // Defer the `once_applied = true` flag to the post-loop
+                // pass so multi-entry composition (e.g. layered
+                // overwrite-then-merge to the same `.kata/vars.toml`)
+                // isn't lock-out'd by a mid-loop flag set. See #85.
+                if is_once {
+                    once_applied_dsts.insert(state_key.clone());
+                }
+                // Mark this dst as kata-touched in the current run so
+                // a later entry targeting the same dst doesn't fall
+                // into the adoption path on the "file exists on disk"
+                // check (the file exists because *we* just wrote it).
+                wrote_in_run.insert(state_key.clone());
 
                 // Track actual writes for applied_at
                 if matches!(outcome.kind, OutcomeKind::Wrote) {
@@ -321,7 +366,21 @@ pub async fn apply_to_pj(
         }
     }
 
-    // 6. Write back applied.toml on success (even partial — see
+    // 6. Post-loop: stamp `once_applied = true` on every dst that any
+    //    when=once entry wrote to (or adopted) during this apply.
+    //    Deferred from mid-loop so that multiple entries targeting
+    //    the same dst (cross-layer composition: overwrite-seed +
+    //    merge-toml additions) all run before the flag locks them
+    //    out. See #85.
+    if !opts.dry_run {
+        for dst in &once_applied_dsts {
+            let mut fs = applied.files.get(dst).cloned().unwrap_or_default();
+            fs.once_applied = true;
+            applied.record(dst, fs);
+        }
+    }
+
+    // 7. Write back applied.toml on success (even partial — see
     //    resilience principle).
     if !opts.dry_run {
         applied.preset = preset_spec;

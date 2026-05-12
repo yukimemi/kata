@@ -1086,3 +1086,123 @@ fn once_status_does_not_threaten_to_overwrite_consumer_edits() {
         "status must not threaten to `update` a once file:\n{stdout}"
     );
 }
+
+#[test]
+fn once_flag_composes_across_multiple_entries_to_same_dst() {
+    // Issue #85: `when = "once"` must compose across multiple
+    // `[[file]]` entries targeting the same dst. The flag is deferred
+    // to a post-apply pass so the first entry's write doesn't lock
+    // out the second entry's merge-toml on the same dst within the
+    // same apply run.
+    //
+    // Fixture: pj-base overwrites `.kata/vars.toml` (when=once), then
+    // pj-rust merge-toml's `actions.swatinem` into the same dst
+    // (when=once). Before the fix this skipped the pj-rust entry
+    // silently. After the fix both entries fire and the dst has
+    // both keys.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "vars.toml"
+            dst = ".kata/vars.toml"
+            how = "overwrite"
+            when = "once"
+            "#,
+        )
+        .file("vars.toml", "[actions]\ncheckout = \"v6\"\n");
+
+    TemplateBuilder::new(templates.join("pj-rust"))
+        .manifest(
+            r#"
+            name = "pj-rust"
+            [[file]]
+            src = "vars.rust.toml"
+            dst = ".kata/vars.toml"
+            how = "merge-toml"
+            when = "once"
+            paths = ["actions.swatinem"]
+            "#,
+        )
+        .file("vars.rust.toml", "[actions]\nswatinem = \"v2\"\n");
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        [[templates]]
+        source = "../templates/pj-rust"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // After init, .kata/vars.toml must have BOTH keys merged.
+    let vars_body = std::fs::read_to_string(pj.join(".kata/vars.toml")).unwrap();
+    let vars: toml::Table = toml::from_str(&vars_body).unwrap();
+    let actions = vars["actions"].as_table().expect("actions table missing");
+    assert_eq!(
+        actions.get("checkout").and_then(|v| v.as_str()),
+        Some("v6"),
+        "pj-base's `checkout` pin must be present: {vars_body}"
+    );
+    assert_eq!(
+        actions.get("swatinem").and_then(|v| v.as_str()),
+        Some("v2"),
+        "pj-rust's `swatinem` pin (merge-toml from second layer) must be present: {vars_body}"
+    );
+
+    // applied.toml records once_applied = true for the composed dst
+    let applied: toml::Table =
+        toml::from_str(&std::fs::read_to_string(pj.join(".kata/applied.toml")).unwrap()).unwrap();
+    let vars_state = applied["files"]
+        .as_table()
+        .unwrap()
+        .get(".kata/vars.toml")
+        .expect("vars.toml entry missing from applied.toml")
+        .as_table()
+        .unwrap();
+    assert_eq!(
+        vars_state.get("once_applied").and_then(|v| v.as_bool()),
+        Some(true),
+        "once_applied must be true after first apply"
+    );
+
+    // Consumer edits the file (Renovate-style bump or hand edit).
+    let edit = "[actions]\ncheckout = \"v6.0.2\"\nswatinem = \"v2\"\nuser_added = \"true\"\n";
+    write(&pj.join(".kata/vars.toml"), edit);
+
+    // Second apply: both entries must skip (once_applied=true), so
+    // the consumer's edit survives untouched.
+    kata(td.path())
+        .args(["apply", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    let after = std::fs::read_to_string(pj.join(".kata/vars.toml")).unwrap();
+    assert!(
+        after.contains("user_added"),
+        "consumer's edit must survive second apply (once_applied gate): {after}"
+    );
+    assert!(
+        after.contains("v6.0.2"),
+        "Renovate-style bump must survive second apply: {after}"
+    );
+}
