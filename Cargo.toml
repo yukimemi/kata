@@ -46,7 +46,7 @@ serde_yaml = "0.9.34"
 # the consumer's interleaved keys. Pulls in indexmap transitively.
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 toml = "1.1.2"
-toml_edit = "0.23"
+toml_edit = "0.25.11"
 
 # Errors
 thiserror = "2.0.18"
@@ -54,13 +54,13 @@ anyhow = "1.0.102"
 
 # Filesystem / paths
 camino = { version = "1.2.2", features = ["serde1"] }
-directories = "5.0.1"
+directories = "6.0.0"
 
 # Time
 jiff = { version = "0.2.24", features = ["serde"] }
 
 # UI
-inquire = "0.7"
+inquire = "0.9.4"
 indicatif = "0.18.4"
 similar = "3.1.0"
 owo-colors = "4.3.0"
@@ -79,7 +79,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # PATH resolution for AI CLI subprocesses (claude / gemini / codex …).
 # Used by `ai::process::resolve_cli` to find the agent binary on
 # Windows (PATHEXT + .ps1 fallback) the same way rvpm does.
-which = "7.0.3"
+which = "8.0.2"
 
 # Secure tmp file allocation for the AI handoff prompt — must live
 # in [dependencies] (not just [dev-dependencies]) because
