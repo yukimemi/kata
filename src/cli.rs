@@ -204,6 +204,25 @@ pub enum Command {
         /// for that PJ.
         #[arg(long = "reseed", value_name = "PATH")]
         reseed: Vec<String>,
+        /// Fast-forward each PJ from its tracked remote before
+        /// running apply. `--ff-only`; if the local branch has
+        /// diverged the PJ is reported and apply is skipped for
+        /// it (per the resilience principle). Requires `--all`.
+        /// See #94.
+        #[arg(long, requires = "all")]
+        pull: bool,
+        /// After a clean apply, stage every kata-touched path in
+        /// each PJ and create a commit with this message. Skipped
+        /// silently for PJs where the apply produced no on-disk
+        /// delta. Requires `--all`. See #94.
+        #[arg(long = "commit", value_name = "MSG", requires = "all")]
+        commit: Option<String>,
+        /// After committing (`--commit`), push the PJ's current
+        /// branch to its tracked remote. PJs without an upstream
+        /// are logged and skipped, not errored. Implies `--commit`
+        /// must also be set. Requires `--all`. See #94.
+        #[arg(long, requires = "all", requires = "commit")]
+        push: bool,
     },
 
     /// Show what would change if `apply` were to run. Without
@@ -415,6 +434,9 @@ impl Cli {
                 allow_dirty,
                 skip_dirty,
                 reseed,
+                pull,
+                commit,
+                push,
             } => {
                 let (kind, no_ai) = resolve_ai_inputs(ai, no_ai);
                 if all {
@@ -434,6 +456,9 @@ impl Cli {
                         allow_dirty,
                         skip_dirty,
                         reseed,
+                        pull,
+                        commit,
+                        push,
                     )
                     .await
                 } else {

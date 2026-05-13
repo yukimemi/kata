@@ -102,7 +102,26 @@ pub async fn run_all(
     allow_dirty: bool,
     skip_dirty: bool,
     reseed: Vec<String>,
+    pull: bool,
+    commit: Option<String>,
+    push: bool,
 ) -> Result<()> {
+    // `--push` requires a commit message — there's nothing to push
+    // without `--commit`. clap also enforces `requires = "commit"`,
+    // but the explicit early check produces a friendlier error than
+    // a dry-run that walks the registry first.
+    if push && commit.is_none() {
+        return Err(Error::Config(
+            "`--push` requires `--commit <msg>` (nothing to push without a commit)".into(),
+        ));
+    }
+    if (pull || commit.is_some() || push) && dry_run {
+        return Err(Error::Config(
+            "`--pull` / `--commit` / `--push` cannot be combined with `--dry-run` \
+             (those flags only make sense with a real apply that writes to disk)"
+                .into(),
+        ));
+    }
     let config = GlobalConfig::load()?;
     let mut projects = select_registered_projects(&config, &tag_filter);
     if projects.is_empty() {
@@ -184,6 +203,55 @@ pub async fn run_all(
         }
     }
 
+    let pj_concurrency = resolve_pj_concurrency(pj_concurrency_override);
+
+    // `--pull` (#94): fast-forward each PJ before apply runs.
+    // Done in parallel (same `pj_concurrency` cap as the apply
+    // fan-out) so registry-of-7 doesn't pay 7× sequential network
+    // round-trips. A PJ whose pull fails is dropped from the work
+    // list and surfaced at the end — the resilience principle says
+    // one PJ's network failure must not block the rest of the run.
+    if pull {
+        let sema = Arc::new(Semaphore::new(pj_concurrency.max(1)));
+        let mut set = JoinSet::new();
+        for entry in &projects {
+            let name = entry.name.clone();
+            let path = entry.path.clone();
+            let sema = sema.clone();
+            set.spawn(async move {
+                let _permit = sema.acquire_owned().await.expect("sema closed");
+                let result = crate::vcs::pull_ff(&path).await;
+                (name, path, result)
+            });
+        }
+        let mut pull_failures: Vec<(String, Utf8PathBuf, String)> = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            let (name, path, result) =
+                joined.map_err(|e| Error::Other(anyhow::anyhow!("--pull join error: {e}")))?;
+            if let Err(e) = result {
+                pull_failures.push((name, path, e.to_string()));
+            }
+        }
+        pull_failures.sort_by(|a, b| a.0.cmp(&b.0));
+        if !pull_failures.is_empty() {
+            eprintln!(
+                "\n--pull failed for {} PJ(s) — they're skipped for this apply:",
+                pull_failures.len()
+            );
+            for (name, path, msg) in &pull_failures {
+                eprintln!("  {name} ({path}): {msg}");
+            }
+            let failed_paths: std::collections::HashSet<Utf8PathBuf> =
+                pull_failures.iter().map(|(_, p, _)| p.clone()).collect();
+            projects.retain(|p| !failed_paths.contains(&p.path));
+            if projects.is_empty() {
+                return Err(Error::Other(anyhow::anyhow!(
+                    "every PJ failed `git pull --ff-only`; nothing to apply"
+                )));
+            }
+        }
+    }
+
     let opts_template = build_options(
         dry_run,
         vars,
@@ -197,7 +265,6 @@ pub async fn run_all(
         reseed,
     )?;
 
-    let pj_concurrency = resolve_pj_concurrency(pj_concurrency_override);
     let sema = Arc::new(Semaphore::new(pj_concurrency.max(1)));
 
     let mut set = JoinSet::new();
@@ -213,6 +280,11 @@ pub async fn run_all(
         });
     }
 
+    // Collect per-PJ apply outcomes so the post-apply `--commit /
+    // --push` pass can iterate over the same set. (The previous
+    // version printed + accumulated errors inline; we keep the
+    // print but defer error tallying until after commit/push.)
+    let mut results: Vec<(String, Utf8PathBuf, PjApplyResult)> = Vec::new();
     let mut total_errors = 0usize;
     while let Some(joined) = set.join_next().await {
         let (label, path, result) = match joined {
@@ -227,10 +299,66 @@ pub async fn run_all(
             Ok(r) => {
                 print_pj_outcome(&r, path.as_str(), no_color);
                 total_errors += r.errors.len();
+                results.push((label, path, r));
             }
             Err(e) => {
                 eprintln!("\n[error] {label} ({path}): {e}");
                 total_errors += 1;
+            }
+        }
+    }
+
+    // `--commit` / `--push` (#94). Run sequentially per PJ because
+    // each PJ touches its own working tree + remote and the
+    // operations themselves are i/o-bound on a single repo, not
+    // cpu-bound. Parallelising wouldn't buy us much and would
+    // muddle the error report ordering.
+    if let Some(msg) = commit.as_ref() {
+        for (name, path, result) in &results {
+            // Only stage paths kata actually wrote (or collapsed
+            // back to unchanged but still touched). Consumer WIP
+            // outside that set is intentionally NOT included.
+            let wrote: Vec<String> = result
+                .actions
+                .iter()
+                .filter(|(_, k)| matches!(k, crate::modes::OutcomeKind::Wrote))
+                .map(|(p, _)| p.clone())
+                .collect();
+            if wrote.is_empty() {
+                continue;
+            }
+            match crate::vcs::commit_paths(path, &wrote, msg).await {
+                Ok(false) => {
+                    // Index matched HEAD after staging — the
+                    // `Wrote` outcomes recorded by the runner
+                    // didn't translate into on-disk changes
+                    // (could happen if a hook silently reverted
+                    // them). Quiet skip.
+                }
+                Ok(true) => {
+                    eprintln!("  committed in {name} ({path})");
+                    if push {
+                        match crate::vcs::push_current(path).await {
+                            Ok(true) => {
+                                eprintln!("  pushed {name}");
+                            }
+                            Ok(false) => {
+                                eprintln!(
+                                    "  warn: {name} has no upstream configured; \
+                                     commit kept locally"
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("  [error] push {name}: {e}");
+                                total_errors += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  [error] commit {name}: {e}");
+                    total_errors += 1;
+                }
             }
         }
     }
