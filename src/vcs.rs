@@ -224,9 +224,32 @@ pub async fn push_current(dir: &Utf8Path) -> Result<bool> {
         .await
         .map_err(|e| Error::Git(format!("spawn `git rev-parse @{{u}}` in {dir}: {e}")))?;
     if !upstream.status.success() {
-        // No upstream / detached HEAD: kata-level "nothing to
-        // push", let the caller log a warning.
-        return Ok(false);
+        // `rev-parse @{u}` failing is benign for kata only when
+        // it's specifically "no upstream configured" or the
+        // current HEAD has no upstream to resolve (detached HEAD
+        // / unborn branch). Other non-zero exits (config
+        // corruption, broken HEAD, missing repo …) are real
+        // failures and must surface — silently swallowing them
+        // would mask the symptom and make `--push` look like a
+        // benign no-op when something's actually wrong. C-locale
+        // is forced via `git_in`, so the substring check is
+        // stable regardless of consumer LANG. See PR #97 review.
+        let stderr = String::from_utf8_lossy(&upstream.stderr);
+        let s = stderr.to_ascii_lowercase();
+        let benign = s.contains("no upstream configured")
+            // Detached HEAD / unborn branch:
+            //   "fatal: ambiguous argument '@{u}': unknown revision …"
+            // covers both. Match each clause separately so a slight
+            // wording change in either still gets caught.
+            || s.contains("ambiguous argument '@{u}'")
+            || s.contains("unknown revision");
+        if benign {
+            return Ok(false);
+        }
+        return Err(Error::Git(format!(
+            "git rev-parse @{{u}} in {dir}: {}",
+            stderr.trim()
+        )));
     }
 
     let output = git_in(dir)
