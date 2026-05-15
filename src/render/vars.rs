@@ -205,6 +205,28 @@ impl VarSources {
         }
         Ok(merged)
     }
+
+    /// Look up `key` in every source layer and return the values
+    /// in **low → high precedence order**. The single hard-coded
+    /// chain lives here so callers (e.g. `VarResolver::resolve_one`)
+    /// don't drift away from canonical precedence when a new
+    /// source is added; adding a field to `VarSources` means
+    /// extending this method in one place and every consumer
+    /// picks up the new layer at the right slot.
+    ///
+    /// Each entry is `(Option<&toml::Value>, VarSource)`; sources
+    /// that don't carry the key contribute `None` so a deep-merge
+    /// caller can skip them with a single `?` / `let-else`.
+    pub fn get_in_precedence_order(&self, key: &str) -> Vec<(Option<&toml::Value>, VarSource)> {
+        vec![
+            (self.template_seed.get(key), VarSource::TemplateSeed),
+            (self.preset.get(key), VarSource::Preset),
+            (self.applied.get(key), VarSource::Applied),
+            (self.vars_file.get(key), VarSource::VarsFile),
+            (self.env.get(key), VarSource::Env),
+            (self.cli.get(key), VarSource::Cli),
+        ]
+    }
 }
 
 /// Deep-merge `src` into `dst` (used to combine each template's
@@ -314,20 +336,23 @@ where
         // applied.toml-vars filter then sees the merged value as
         // "owned by VarsFile / Env / etc." and persists or skips
         // it the same way it did before.
-        let ordered: [(Option<&toml::Value>, VarSource); 6] = [
-            (self.sources.template_seed.get(key), VarSource::TemplateSeed),
-            (self.sources.preset.get(key), VarSource::Preset),
-            (self.sources.applied.get(key), VarSource::Applied),
-            (self.sources.vars_file.get(key), VarSource::VarsFile),
-            (self.sources.env.get(key), VarSource::Env),
-            (self.sources.cli.get(key), VarSource::Cli),
-        ];
-
+        //
+        // The precedence chain itself lives on `VarSources` so a
+        // new source field is picked up here without touching this
+        // method (Gemini, #100 review).
         let mut merged: Option<toml::Value> = None;
         let mut highest: Option<VarSource> = None;
-        for (val_opt, source) in ordered {
+        for (val_opt, source) in self.sources.get_in_precedence_order(key) {
             let Some(val) = val_opt else { continue };
             highest = Some(source);
+            // The clone here is unavoidable while we accumulate
+            // into an owned `toml::Value` — `toml::Value::Table`
+            // owns its underlying `Table`, so even a
+            // `&Table -> Table` deep merge has to copy the leaf
+            // values anyway. Deferring the clone to the table
+            // arm (the only one that needs structural access)
+            // doesn't reduce the work, just shuffles where the
+            // copy happens (see #100 review).
             merged = Some(match (merged.take(), val.clone()) {
                 (None, new) => new,
                 (Some(toml::Value::Table(mut acc)), toml::Value::Table(new_t)) => {
