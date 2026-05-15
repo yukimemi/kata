@@ -5,6 +5,11 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://deepwiki.com/yukimemi/kata"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"/></a>
+  <a href="https://codewiki.google/github.com/yukimemi/kata"><img src="https://img.shields.io/badge/View-Code_Wiki-4285F4?logo=google" alt="View Code Wiki"/></a>
+</p>
+
 > 型 — *the woodblock pattern*. A multi-project template applier
 > with AI-delegated merge for the files that resist mechanical
 > sync.
