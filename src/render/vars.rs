@@ -293,30 +293,65 @@ where
         key: &str,
         spec: Option<&VarSpec>,
     ) -> Result<Option<(toml::Value, VarSource)>> {
-        // 1) CLI
-        if let Some(v) = self.sources.cli.get(key) {
-            return Ok(Some((v.clone(), VarSource::Cli)));
+        // Walk sources low → high precedence, accumulating into
+        // `merged`. For scalar / array values the higher source
+        // simply overwrites the lower one (the historic behaviour
+        // — single-source provenance). For TABLE values we
+        // deep-merge so a partial top-level table in one source
+        // (e.g. `.kata/vars.toml` carrying only the pj-base layer
+        // of `[actions]`) doesn't shadow keys the lower-precedence
+        // layers (template seeds) contribute.
+        //
+        // Without this, `[actions]` in `.kata/vars.toml` containing
+        // only `{checkout, create_pull_request}` would wipe out the
+        // pj-rust template seed's `swatinem_rust_cache` and break
+        // the ci.yml.tera render — see the bug surfaced when an
+        // old kata wrote a partial vars.toml then a newer kata
+        // tried to re-apply on top of it.
+        //
+        // The recorded `VarSource` is whichever source contributed
+        // the *highest-precedence* layer of the merged value — the
+        // applied.toml-vars filter then sees the merged value as
+        // "owned by VarsFile / Env / etc." and persists or skips
+        // it the same way it did before.
+        let ordered: [(Option<&toml::Value>, VarSource); 6] = [
+            (self.sources.template_seed.get(key), VarSource::TemplateSeed),
+            (self.sources.preset.get(key), VarSource::Preset),
+            (self.sources.applied.get(key), VarSource::Applied),
+            (self.sources.vars_file.get(key), VarSource::VarsFile),
+            (self.sources.env.get(key), VarSource::Env),
+            (self.sources.cli.get(key), VarSource::Cli),
+        ];
+
+        let mut merged: Option<toml::Value> = None;
+        let mut highest: Option<VarSource> = None;
+        for (val_opt, source) in ordered {
+            let Some(val) = val_opt else { continue };
+            highest = Some(source);
+            merged = Some(match (merged.take(), val.clone()) {
+                (None, new) => new,
+                (Some(toml::Value::Table(mut acc)), toml::Value::Table(new_t)) => {
+                    // `deep_merge_table(dst, src)` lets `src` win
+                    // on leaf conflicts, which matches our "higher
+                    // source overwrites lower" rule (the loop's
+                    // current iteration is the higher one).
+                    deep_merge_table(&mut acc, new_t);
+                    toml::Value::Table(acc)
+                }
+                (Some(_), new) => {
+                    // Scalar / array (or shape change): higher
+                    // source replaces lower wholesale.
+                    new
+                }
+            });
         }
-        // 2) env
-        if let Some(v) = self.sources.env.get(key) {
-            return Ok(Some((v.clone(), VarSource::Env)));
+        if let Some(value) = merged {
+            return Ok(Some((
+                value,
+                highest.expect("highest set whenever merged is"),
+            )));
         }
-        // 3) .kata/vars.toml
-        if let Some(v) = self.sources.vars_file.get(key) {
-            return Ok(Some((v.clone(), VarSource::VarsFile)));
-        }
-        // 4) applied
-        if let Some(v) = self.sources.applied.get(key) {
-            return Ok(Some((v.clone(), VarSource::Applied)));
-        }
-        // 5) preset
-        if let Some(v) = self.sources.preset.get(key) {
-            return Ok(Some((v.clone(), VarSource::Preset)));
-        }
-        // 6) template-side vars.toml seed
-        if let Some(v) = self.sources.template_seed.get(key) {
-            return Ok(Some((v.clone(), VarSource::TemplateSeed)));
-        }
+
         // 7) manifest default
         let spec = match spec {
             Some(s) => s,
@@ -418,6 +453,99 @@ mod tests {
         let out = r.resolve().unwrap();
         assert_eq!(out.values["k"].as_str(), Some("from-cli"));
         assert_eq!(out.sources["k"], VarSource::Cli);
+    }
+
+    fn table(entries: &[(&str, &str)]) -> toml::Value {
+        toml::Value::Table(toml::Table::from_iter(
+            entries
+                .iter()
+                .map(|(k, v)| (k.to_string(), toml::Value::String((*v).to_string()))),
+        ))
+    }
+
+    #[test]
+    fn partial_table_in_vars_file_does_not_shadow_template_seed_siblings() {
+        // Repro for the bug surfaced when an older kata wrote a
+        // partial `.kata/vars.toml` (only pj-base's actions like
+        // `checkout`) and a newer kata tried to re-apply on top of
+        // it. Without per-key Table deep-merge, the partial vars
+        // file's `[actions]` table fully replaced the template
+        // seed's `[actions]`, wiping out the pj-rust seed's
+        // `swatinem_rust_cache` and breaking ci.yml.tera render.
+        //
+        // The resolver should now deep-merge tables across sources,
+        // so the merged `actions` table contains every key any
+        // source ships, with higher-precedence sources winning on
+        // leaf conflicts.
+        let specs = BTreeMap::new();
+        let sources = VarSources {
+            // Higher precedence — pj-base layer only.
+            vars_file: toml::Table::from_iter([(
+                "actions".to_string(),
+                table(&[("checkout", "v6.0.2"), ("create_pull_request", "v8")]),
+            )]),
+            // Lower precedence — pj-base + pj-rust template seed
+            // contributions deep-merged before resolve runs.
+            template_seed: toml::Table::from_iter([(
+                "actions".to_string(),
+                table(&[
+                    ("checkout", "v6"),
+                    ("create_pull_request", "v7"),
+                    ("swatinem_rust_cache", "v2"),
+                ]),
+            )]),
+            ..Default::default()
+        };
+        let r = VarResolver {
+            specs: &specs,
+            sources: &sources,
+            interactive: false,
+            prompter: never_prompt,
+        };
+        let out = r.resolve().unwrap();
+        let actions = out.values["actions"].as_table().expect("table");
+        // High-precedence (vars_file) keys win on leaf conflict.
+        assert_eq!(actions["checkout"].as_str(), Some("v6.0.2"));
+        assert_eq!(actions["create_pull_request"].as_str(), Some("v8"));
+        // Lower-precedence keys (only in template_seed) survive —
+        // this is the bug fix.
+        assert_eq!(
+            actions["swatinem_rust_cache"].as_str(),
+            Some("v2"),
+            "template_seed's swatinem_rust_cache must survive a partial vars_file overlay",
+        );
+        // Provenance points at the highest-precedence layer that
+        // contributed (vars_file here).
+        assert_eq!(out.sources["actions"], VarSource::VarsFile);
+    }
+
+    #[test]
+    fn scalar_in_higher_source_still_overrides_table_in_lower() {
+        // Shape change across precedence layers stays a wholesale
+        // replacement: if a higher source ships a scalar while a
+        // lower source ships a table at the same key, the higher
+        // wins. (Same behaviour as before the deep-merge change —
+        // only Table+Table pairs deep-merge.)
+        let specs = BTreeMap::new();
+        let sources = VarSources {
+            vars_file: toml::Table::from_iter([(
+                "k".to_string(),
+                toml::Value::String("scalar-wins".into()),
+            )]),
+            template_seed: toml::Table::from_iter([(
+                "k".to_string(),
+                table(&[("nested", "from-seed")]),
+            )]),
+            ..Default::default()
+        };
+        let r = VarResolver {
+            specs: &specs,
+            sources: &sources,
+            interactive: false,
+            prompter: never_prompt,
+        };
+        let out = r.resolve().unwrap();
+        assert_eq!(out.values["k"].as_str(), Some("scalar-wins"));
     }
 
     #[test]
