@@ -39,6 +39,18 @@
 //! an existing non-empty array, the path is a silent no-op rather
 //! than padding empty tables.
 //!
+//! **Inline array indexing (#111)**: the same `name[idx]` form
+//! also addresses elements of an *inline* array
+//! (`Item::Value(Value::Array(_))`) — `tags = ["a", "b"]`,
+//! `dependencies = ["fmt", "clippy"]`, and so on. Same conservative
+//! rules as the AoT case: bootstrap only at `idx == 0` when the
+//! entry is missing or empty, refuse to clobber a non-array slot,
+//! no-op on out-of-range indices. The setter dispatches on the
+//! incoming `Item` variant — `Item::Table` → AoT; `Item::Value` →
+//! inline array — so a shape mismatch (existing is AoT but
+//! incoming is inline, or vice versa) naturally bails out without
+//! restructuring the consumer's file.
+//!
 //! **Regex paths (#62)**: a `paths` entry wrapped in `//...//` is
 //! interpreted as a regex against the incoming document's
 //! dotted-path keys (rvpm-style). kata walks every dotted path in
@@ -56,7 +68,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
 use super::merge_path::{PathSeg, PathSpec, parse_path_spec, parse_segments, shallowest_matches};
 
@@ -248,8 +260,18 @@ fn collect_dotted_paths(item: &Item, prefix: &str, out: &mut Vec<String>) {
                 collect_in_table(elem, &path, out);
             }
         }
-        // Inline values, inline tables, value arrays — no further
-        // walk (same as pre-#107).
+        // Inline arrays (#111): emit per-element paths so regex
+        // specs can target them. Elements are scalars / inline
+        // values, so don't recurse — `parse_segments` rejects
+        // chained `[N][M]` and there's no Key step into a
+        // non-table.
+        Item::Value(Value::Array(arr)) => {
+            for (idx, _elem) in arr.iter().enumerate() {
+                let path = format!("{prefix}[{idx}]");
+                out.push(path);
+            }
+        }
+        // Inline tables, scalars, datetimes — no further walk.
         _ => {}
     }
 }
@@ -350,12 +372,29 @@ fn item_at_table_path(table: &Table, path: &[PathSeg]) -> Option<Item> {
             item_at_table_path(next.as_table()?, rest)
         }
         PathSeg::KeyIndex(k, i) => {
-            let aot = table.get(k)?.as_array_of_tables()?;
-            let elem = aot.get(*i)?;
-            if rest.is_empty() {
-                return Some(Item::Table(elem.clone()));
+            let entry = table.get(k)?;
+            // Try array-of-tables first — that's the kata#107
+            // shape. Inline arrays (#111) fall through to the
+            // `as_array` branch below.
+            if let Some(aot) = entry.as_array_of_tables() {
+                let elem = aot.get(*i)?;
+                if rest.is_empty() {
+                    return Some(Item::Table(elem.clone()));
+                }
+                return item_at_table_path(elem, rest);
             }
-            item_at_table_path(elem, rest)
+            if let Some(arr) = entry.as_array() {
+                let v = arr.get(*i)?;
+                if rest.is_empty() {
+                    return Some(Item::Value(v.clone()));
+                }
+                // Inline-array elements are scalars / inline values
+                // / inline tables — none of them continue a path
+                // walk under kata's current scope. Bail out instead
+                // of silently producing partial results.
+                return None;
+            }
+            None
         }
     }
 }
@@ -399,20 +438,39 @@ fn set_in_table(table: &mut Table, path: &[PathSeg], value: Item) {
             }
         }
         PathSeg::KeyIndex(k, i) => {
-            let Some(elem) = ensure_aot_element(table, k, *i) else {
-                return;
-            };
             if is_leaf {
-                // `ArrayOfTables` only holds `Table` values. If the
-                // incoming item isn't a table (e.g. someone aimed
-                // an array-index path at a scalar value in the
-                // template), refuse rather than synthesise a stray
-                // shape.
-                let Item::Table(value_table) = value else {
+                // Dispatch on the incoming `Item` variant so the
+                // setter picks AoT (#107) or inline-array (#111)
+                // based on what the template authored. A shape
+                // mismatch with the consumer's existing file
+                // naturally bails out inside the helpers
+                // (`ensure_aot_element` rejects non-AoT slots,
+                // `ensure_array_element` rejects non-Array slots).
+                match value {
+                    Item::Table(value_table) => {
+                        let Some(elem) = ensure_aot_element(table, k, *i) else {
+                            return;
+                        };
+                        *elem = value_table;
+                    }
+                    Item::Value(value_v) => {
+                        let Some(elem) = ensure_array_element(table, k, *i) else {
+                            return;
+                        };
+                        *elem = value_v;
+                    }
+                    // `Item::ArrayOfTables` and `Item::None` at the
+                    // leaf don't have a sensible destination here.
+                    _ => {}
+                }
+            } else {
+                // Intermediate KeyIndex — only AoT can continue the
+                // walk. Inline-array elements don't carry sub-paths
+                // (their elements are scalars / inline tables which
+                // terminate the walk in `item_at_table_path`).
+                let Some(elem) = ensure_aot_element(table, k, *i) else {
                     return;
                 };
-                *elem = value_table;
-            } else {
                 set_in_table(elem, rest, value);
             }
         }
@@ -434,28 +492,81 @@ fn set_in_table(table: &mut Table, path: &[PathSeg], value: Item) {
 /// - key present, `idx < len` → return element `idx`
 /// - any other out-of-range case → no-op
 fn ensure_aot_element<'a>(table: &'a mut Table, key: &str, idx: usize) -> Option<&'a mut Table> {
-    if !table.contains_key(key) {
-        if idx != 0 {
-            return None;
+    match table.entry(key) {
+        toml_edit::Entry::Vacant(slot) => {
+            if idx != 0 {
+                return None;
+            }
+            let mut aot = ArrayOfTables::new();
+            aot.push(Table::new());
+            slot.insert(Item::ArrayOfTables(aot))
+                .as_array_of_tables_mut()?
+                .get_mut(0)
         }
-        let mut aot = ArrayOfTables::new();
-        aot.push(Table::new());
-        table.insert(key, Item::ArrayOfTables(aot));
-        return table.get_mut(key)?.as_array_of_tables_mut()?.get_mut(0);
-    }
-    let entry = table.get_mut(key)?;
-    let aot = entry.as_array_of_tables_mut()?;
-    if aot.is_empty() {
-        if idx != 0 {
-            return None;
+        toml_edit::Entry::Occupied(slot) => {
+            // `into_mut` returns `&'a mut Item` with the table's
+            // lifetime; `get_mut` would borrow from the entry and
+            // can't escape this arm.
+            let aot = slot.into_mut().as_array_of_tables_mut()?;
+            if aot.is_empty() {
+                if idx != 0 {
+                    return None;
+                }
+                aot.push(Table::new());
+                return aot.get_mut(0);
+            }
+            if idx >= aot.len() {
+                return None;
+            }
+            aot.get_mut(idx)
         }
-        aot.push(Table::new());
-        return aot.get_mut(0);
     }
-    if idx >= aot.len() {
-        return None;
+}
+
+/// Inline-array counterpart of `ensure_aot_element` for #111.
+/// Same conservative rules but on `Item::Value(Value::Array(_))`:
+///
+/// - key missing AND `idx != 0` → no-op
+/// - key missing AND `idx == 0` → create `Value::Array(vec![placeholder])`
+///   and return a borrow to slot 0 (caller overwrites the placeholder)
+/// - key present, not an inline array → no-op (refuse-to-clobber;
+///   covers the shape mismatch where existing is `ArrayOfTables`
+///   but incoming is inline)
+/// - key present, empty array AND `idx == 0` → push a placeholder
+///   and return a borrow to it
+/// - key present, `idx < len` → return slot `idx`
+/// - any other out-of-range case → no-op
+///
+/// The placeholder (`Value::from(0i64)`) is overwritten by the
+/// caller before `.to_string()` runs, so its choice doesn't show
+/// up in the output. An integer is just a stable default.
+fn ensure_array_element<'a>(table: &'a mut Table, key: &str, idx: usize) -> Option<&'a mut Value> {
+    match table.entry(key) {
+        toml_edit::Entry::Vacant(slot) => {
+            if idx != 0 {
+                return None;
+            }
+            let mut arr = Array::new();
+            arr.push(Value::from(0i64));
+            slot.insert(Item::Value(Value::Array(arr)))
+                .as_array_mut()?
+                .get_mut(0)
+        }
+        toml_edit::Entry::Occupied(slot) => {
+            let arr = slot.into_mut().as_array_mut()?;
+            if arr.is_empty() {
+                if idx != 0 {
+                    return None;
+                }
+                arr.push(Value::from(0i64));
+                return arr.get_mut(0);
+            }
+            if idx >= arr.len() {
+                return None;
+            }
+            arr.get_mut(idx)
+        }
     }
-    aot.get_mut(idx)
 }
 
 fn require_paths<'a>(ctx: &'a ActionContext<'_>) -> Result<&'a Vec<String>> {
@@ -950,6 +1061,150 @@ cmd = \"b\"
         assert!(
             paths.iter().any(|p| p == "hooks.post_create[0].cmd"),
             "inside-element path present: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn merge_replaces_only_index_zero_of_inline_array() {
+        // yukimemi/kata#111: cargo-make-style `dependencies = [...]`
+        // (inline array of strings). Template owns idx 0; consumer
+        // appends their own extra step at idx 1+.
+        let existing = "\
+[tasks.on-add]
+dependencies = [\"cargo make fmt\", \"bun install\"]
+";
+        let incoming = "\
+[tasks.on-add]
+dependencies = [\"cargo make fmt-v2\"]
+";
+        let merged = merge(Some(existing), incoming, &["tasks.on-add.dependencies[0]"]);
+        assert!(
+            merged.contains("cargo make fmt-v2"),
+            "element 0 must be updated: {merged}"
+        );
+        assert!(
+            merged.contains("bun install"),
+            "consumer's element 1 must survive: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_bootstraps_inline_array_when_missing() {
+        let existing = "[tasks.on-add]\n";
+        let incoming = "\
+[tasks.on-add]
+dependencies = [\"cargo make fmt\"]
+";
+        let merged = merge(Some(existing), incoming, &["tasks.on-add.dependencies[0]"]);
+        assert!(
+            merged.contains("dependencies = [\"cargo make fmt\"]")
+                || merged.contains("dependencies = [\"cargo make fmt\",]"),
+            "missing inline array must be bootstrapped: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_skips_out_of_range_index_on_shorter_inline_array() {
+        let existing = "deps = [\"keep\"]\n";
+        let incoming = "deps = [\"first\", \"second\"]\n";
+        let merged = merge(Some(existing), incoming, &["deps[1]"]);
+        // unchanged — conservative no-pad
+        assert!(merged.contains("\"keep\""));
+        assert!(
+            !merged.contains("\"second\""),
+            "must not pad / append: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_refuses_to_clobber_non_array_at_inline_index_path() {
+        // Existing has `tags` as a scalar (wrong shape). Path
+        // `tags[0]` must not clobber the scalar.
+        let existing = "tags = \"not-an-array\"\n";
+        let incoming = "tags = [\"first\"]\n";
+        let merged = merge(Some(existing), incoming, &["tags[0]"]);
+        assert!(
+            merged.contains("tags = \"not-an-array\""),
+            "non-array intermediate must NOT be clobbered: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_can_replace_string_element_of_inline_array() {
+        // The simple `tags[0]` case — array of strings, replace
+        // element 0 only.
+        let existing = "tags = [\"old\", \"keep\"]\n";
+        let incoming = "tags = [\"new\"]\n";
+        let merged = merge(Some(existing), incoming, &["tags[0]"]);
+        assert!(merged.contains("\"new\""), "idx 0 updated: {merged}");
+        assert!(merged.contains("\"keep\""), "idx 1 preserved: {merged}");
+    }
+
+    #[test]
+    fn merge_inline_array_index_is_idempotent() {
+        let existing = "\
+[tasks.on-add]
+dependencies = [\"cargo make fmt\", \"bun install\"]
+";
+        let incoming = "\
+[tasks.on-add]
+dependencies = [\"cargo make fmt\"]
+";
+        let first = merge(Some(existing), incoming, &["tasks.on-add.dependencies[0]"]);
+        let second = merge(Some(&first), incoming, &["tasks.on-add.dependencies[0]"]);
+        assert_eq!(first, second, "inline-array index merge must be idempotent");
+    }
+
+    #[test]
+    fn merge_refuses_when_existing_is_aot_but_incoming_is_inline_array() {
+        // Shape mismatch: existing has `[[deps]]` (AoT) while the
+        // template ships `deps = [...]` (inline). Refuse to
+        // restructure the consumer's data.
+        let existing = "\
+[[deps]]
+name = \"a\"
+";
+        let incoming = "deps = [\"new\"]\n";
+        let merged = merge(Some(existing), incoming, &["deps[0]"]);
+        assert!(
+            merged.contains("[[deps]]") && merged.contains("name = \"a\""),
+            "AoT existing must survive when incoming is inline array: {merged}"
+        );
+    }
+
+    #[test]
+    fn regex_can_target_specific_inline_array_element() {
+        let existing = "deps = [\"old\", \"consumer\"]\n";
+        let incoming = "deps = [\"new\"]\n";
+        let merged = merge(Some(existing), incoming, &[r"//^deps\[0\]$//"]);
+        assert!(merged.contains("\"new\""), "regex hit idx 0: {merged}");
+        assert!(
+            merged.contains("\"consumer\""),
+            "regex left idx 1 alone: {merged}"
+        );
+    }
+
+    #[test]
+    fn collect_dotted_paths_emits_inline_array_index_forms() {
+        let doc: DocumentMut = "\
+[tasks.on-add]
+dependencies = [\"a\", \"b\"]
+"
+        .parse()
+        .unwrap();
+        let mut paths = Vec::new();
+        collect_dotted_paths(doc.as_item(), "", &mut paths);
+        assert!(
+            paths.iter().any(|p| p == "tasks.on-add.dependencies"),
+            "parent inline-array path present: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p == "tasks.on-add.dependencies[0]"),
+            "element 0 path present: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p == "tasks.on-add.dependencies[1]"),
+            "element 1 path present: {paths:?}"
         );
     }
 
