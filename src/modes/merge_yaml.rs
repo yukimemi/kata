@@ -29,6 +29,20 @@
 //! the incoming document's dotted-path keys, and any matching path
 //! is copied from incoming to existing. Mixes freely with literal
 //! paths.
+//!
+//! **Sequence indexing (#107 follow-up)**: a segment of the form
+//! `name[idx]` addresses element `idx` of a YAML sequence at key
+//! `name`. So `servers[0]` lets the template own only the first
+//! element of a `servers:` list while consumers freely append more.
+//! Bootstrap matches `merge-toml`: if the existing file has no
+//! `name` entry at all (or an empty sequence), kata creates /
+//! pushes the index-0 element only. Out-of-range indices on an
+//! existing non-empty sequence are a silent no-op rather than
+//! padding null entries.
+//!
+//! Unlike TOML's `ArrayOfTables` (table-only elements), YAML
+//! sequences are uniform — `tags[0]` works for `tags: [foo, bar]`
+//! too, replacing the string at index 0.
 
 use std::path::PathBuf;
 
@@ -37,7 +51,7 @@ use serde_yaml::{Mapping, Value};
 
 use crate::error::{Error, Result};
 
-use super::merge_path::{PathSpec, parse_path_spec, shallowest_matches};
+use super::merge_path::{PathSeg, PathSpec, parse_path_spec, parse_segments, shallowest_matches};
 use super::{
     ActionContext, ActionOutcome, ActionPlan, ApplyMode, OutcomeKind, PlanKind, unified_diff,
 };
@@ -160,27 +174,46 @@ fn compute_merged(ctx: &ActionContext<'_>) -> Result<String> {
 
 /// Copy the value at one literal dotted path from `incoming_val`
 /// into `existing_val`. Mirrors `merge-toml::copy_one_path`.
+/// `name[idx]` segments address sequence elements (yukimemi/kata
+/// #107 follow-up).
 fn copy_one_path(existing_val: &mut Value, incoming_val: &Value, path_str: &str) -> Result<()> {
-    let segments: Vec<&str> = path_str.split('.').collect();
-    if segments.iter().any(|s| s.is_empty()) {
-        return Err(Error::Merge(format!(
-            "merge-yaml: empty segment in path `{path_str}` (e.g. trailing dot)"
-        )));
+    let segments =
+        parse_segments(path_str).map_err(|e| Error::Merge(format!("merge-yaml: {e}")))?;
+    if segments.is_empty() {
+        return Ok(());
     }
-    if let Some(value) = value_at_path(incoming_val, &segments).cloned() {
+    if let Some(value) = value_at_path(incoming_val, &segments) {
         set_at_path(existing_val, &segments, value);
     }
     Ok(())
 }
 
 /// Recursively enumerate every dotted path in `val` — intermediate
-/// mappings AND their leaves — so a regex spec can match either a
-/// super-key (`^server$`) or a child (`^server\..+$`). Mirrors
+/// mappings AND their leaves, plus `prefix.key[N]` paths for
+/// sequence elements (#107 follow-up). Mirrors
 /// `merge-toml::collect_dotted_paths` for the YAML data model.
 fn collect_dotted_paths(val: &Value, prefix: &str, out: &mut Vec<String>) {
-    let Some(map) = val.as_mapping() else {
-        return;
-    };
+    match val {
+        Value::Mapping(map) => collect_in_mapping(map, prefix, out),
+        // Skip root-level sequences. `parse_segments` rejects the
+        // bare `[N]` form (empty name before `[`), and
+        // `value_at_path` / `set_at_path` both assume the root is a
+        // mapping anyway. A `prefix` only becomes non-empty after
+        // we've recursed through at least one key, so this guard
+        // matches that invariant. See Gemini #110 review.
+        Value::Sequence(seq) if !prefix.is_empty() => {
+            for (idx, elem) in seq.iter().enumerate() {
+                let path = format!("{prefix}[{idx}]");
+                out.push(path.clone());
+                collect_dotted_paths(elem, &path, out);
+            }
+        }
+        // Root-level sequence, scalars, tagged values — no walk.
+        _ => {}
+    }
+}
+
+fn collect_in_mapping(map: &Mapping, prefix: &str, out: &mut Vec<String>) {
     for (key, value) in map {
         let Some(key_str) = key.as_str() else {
             continue;
@@ -191,59 +224,141 @@ fn collect_dotted_paths(val: &Value, prefix: &str, out: &mut Vec<String>) {
             format!("{prefix}.{key_str}")
         };
         out.push(path.clone());
-        if value.is_mapping() {
-            collect_dotted_paths(value, &path, out);
-        }
+        collect_dotted_paths(value, &path, out);
     }
 }
 
-/// Walk a dotted path through nested `Mapping`s and return the
-/// leaf `Value` (or `None` if any segment is missing or the parent
-/// isn't a mapping). Uses `Value::get(&str)` so we don't allocate
-/// a `Value::String` per lookup.
-fn value_at_path<'a>(val: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    let mut current = val;
-    for seg in path {
-        match current {
-            Value::Mapping(_) => current = current.get(*seg)?,
-            _ => return None,
-        }
-    }
-    Some(current)
-}
-
-/// Set the value at a dotted path, creating **missing**
-/// intermediate `Mapping`s as needed. If any intermediate slot is
-/// already occupied by something *other than* a mapping the call
-/// is a silent no-op — same conservative refuse-to-clobber
-/// contract `merge-toml::set_at_path` enforces (see PR #12
-/// for the rationale).
-fn set_at_path(val: &mut Value, path: &[&str], value: Value) {
+/// Walk a path through nested `Mapping`s / `Sequence`s and return
+/// the leaf `Value`, cloned (caller wants ownership for assignment).
+/// Returns `None` if any segment is missing, the parent shape
+/// doesn't match the segment kind (`Key` against a sequence, or
+/// `KeyIndex` against a mapping / scalar), or the index is out of
+/// range.
+fn value_at_path(val: &Value, path: &[PathSeg]) -> Option<Value> {
     if path.is_empty() {
-        return;
+        return Some(val.clone());
     }
+    let map = val.as_mapping()?;
+    value_at_mapping_path(map, path)
+}
 
-    let mut current: &mut Value = val;
-    for &seg in &path[..path.len() - 1] {
-        if !current.is_mapping() {
-            return;
+fn value_at_mapping_path(map: &Mapping, path: &[PathSeg]) -> Option<Value> {
+    let (head, rest) = path.split_first().expect("caller checks non-empty");
+    match head {
+        PathSeg::Key(k) => {
+            let next = map.get(k.as_str())?;
+            if rest.is_empty() {
+                return Some(next.clone());
+            }
+            value_at_mapping_path(next.as_mapping()?, rest)
         }
-        let map = current.as_mapping_mut().expect("just checked is_mapping");
-        if !map.contains_key(seg) {
-            map.insert(
-                Value::String(seg.to_string()),
-                Value::Mapping(Mapping::new()),
-            );
+        PathSeg::KeyIndex(k, i) => {
+            let seq = map.get(k.as_str())?.as_sequence()?;
+            let elem = seq.get(*i)?;
+            if rest.is_empty() {
+                return Some(elem.clone());
+            }
+            value_at_mapping_path(elem.as_mapping()?, rest)
         }
-        current = map.get_mut(seg).expect("just inserted");
     }
+}
 
-    if !current.is_mapping() {
+/// Set the value at a path, creating intermediate **missing**
+/// `Mapping`s and bootstrap `Sequence`s (index 0 only) as needed.
+/// Refuses to clobber a slot already holding a wrong-shape value
+/// (`Key` step into a non-mapping, `KeyIndex` step into a
+/// non-sequence, or out-of-range index on a non-empty existing
+/// sequence) — same conservative contract `merge-toml` enforces.
+fn set_at_path(val: &mut Value, path: &[PathSeg], value: Value) {
+    let Some(map) = val.as_mapping_mut() else {
         return;
+    };
+    set_in_mapping(map, path, value);
+}
+
+fn set_in_mapping(map: &mut Mapping, path: &[PathSeg], value: Value) {
+    let Some((head, rest)) = path.split_first() else {
+        return;
+    };
+    let is_leaf = rest.is_empty();
+    match head {
+        PathSeg::Key(k) => {
+            if is_leaf {
+                map.insert(Value::String(k.clone()), value);
+                return;
+            }
+            if !map.contains_key(k.as_str()) {
+                map.insert(Value::String(k.clone()), Value::Mapping(Mapping::new()));
+            }
+            let next = map.get_mut(k.as_str()).expect("just ensured present");
+            let Some(next_map) = next.as_mapping_mut() else {
+                return; // refuse to clobber a non-mapping intermediate
+            };
+            set_in_mapping(next_map, rest, value);
+        }
+        PathSeg::KeyIndex(k, i) => {
+            if is_leaf {
+                if let Some(elem) = ensure_seq_element(map, k, *i) {
+                    *elem = value;
+                }
+                return;
+            }
+            // Intermediate KeyIndex: the existing element must be
+            // a mapping (or we can bootstrap it as one) to keep
+            // descending. ensure_seq_element gives us the slot;
+            // if it isn't a mapping we refuse to clobber.
+            let Some(elem) = ensure_seq_element(map, k, *i) else {
+                return;
+            };
+            if elem.is_null() {
+                // ensure_seq_element bootstrapped a fresh slot
+                // (sequence was missing or had len==0). Use a
+                // mapping there so the next step can descend.
+                *elem = Value::Mapping(Mapping::new());
+            }
+            let Some(elem_map) = elem.as_mapping_mut() else {
+                return;
+            };
+            set_in_mapping(elem_map, rest, value);
+        }
     }
-    let map = current.as_mapping_mut().expect("just checked is_mapping");
-    let last = path.last().expect("path is non-empty");
-    map.insert(Value::String((*last).to_string()), value);
+}
+
+/// Ensure `map[k][i]` exists and return `&mut Value` to it, or
+/// `None` if the conservative rule says skip:
+///
+/// - key missing AND `i != 0` → no-op (don't pad with nulls)
+/// - key missing AND `i == 0` → create `Value::Sequence(vec![Null])`
+///   and return a borrow to slot 0 (caller decides what to write)
+/// - key present, not a sequence → no-op (refuse-to-clobber)
+/// - key present, empty sequence AND `i == 0` → push a `Null` slot
+///   and return a borrow to it
+/// - key present, `i < len` → return slot `i`
+/// - any other out-of-range case → no-op
+fn ensure_seq_element<'a>(map: &'a mut Mapping, k: &str, i: usize) -> Option<&'a mut Value> {
+    if !map.contains_key(k) {
+        if i != 0 {
+            return None;
+        }
+        map.insert(
+            Value::String(k.to_string()),
+            Value::Sequence(vec![Value::Null]),
+        );
+        return map.get_mut(k)?.as_sequence_mut()?.get_mut(0);
+    }
+    let entry = map.get_mut(k)?;
+    let seq = entry.as_sequence_mut()?;
+    if seq.is_empty() {
+        if i != 0 {
+            return None;
+        }
+        seq.push(Value::Null);
+        return seq.get_mut(0);
+    }
+    if i >= seq.len() {
+        return None;
+    }
+    seq.get_mut(i)
 }
 
 fn require_paths<'a>(ctx: &'a ActionContext<'_>) -> Result<&'a Vec<String>> {
@@ -409,6 +524,209 @@ logging:
         assert_eq!(v["server"]["tls"], Value::Bool(true));
         // Logging path was NOT in the regex — should keep `info`.
         assert_eq!(v["logging"]["level"], Value::String("info".into()));
+    }
+
+    #[test]
+    fn merge_replaces_only_index_zero_of_sequence_of_mappings() {
+        // Mirror of merge-toml's #107 motivating case for YAML's
+        // sequence-of-mappings form. Template owns servers[0], the
+        // consumer keeps the second entry.
+        let existing = "\
+servers:
+  - name: kata-managed
+    port: 8080
+  - name: consumer-added
+    port: 9090
+";
+        let incoming = "\
+servers:
+  - name: kata-managed
+    port: 443
+    tls: true
+";
+        let merged = merge(Some(existing), incoming, &["servers[0]"]);
+        let v: Value = serde_yaml::from_str(&merged).unwrap();
+        assert_eq!(v["servers"][0]["port"], Value::Number(443.into()));
+        assert_eq!(v["servers"][0]["tls"], Value::Bool(true));
+        assert_eq!(
+            v["servers"][1]["name"],
+            Value::String("consumer-added".into()),
+            "consumer's second element must survive: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_bootstraps_sequence_when_missing() {
+        // Existing has no `servers` key at all. Path `servers[0]`
+        // should create the sequence and seed the first element.
+        let existing = "project:\n  name: x\n";
+        let incoming = "\
+servers:
+  - name: a
+    port: 80
+";
+        let merged = merge(Some(existing), incoming, &["servers[0]"]);
+        let v: Value = serde_yaml::from_str(&merged).unwrap();
+        assert_eq!(v["servers"][0]["name"], Value::String("a".into()));
+        assert_eq!(v["servers"][0]["port"], Value::Number(80.into()));
+        assert_eq!(v["project"]["name"], Value::String("x".into()));
+    }
+
+    #[test]
+    fn merge_skips_out_of_range_index_on_shorter_sequence() {
+        // Existing has 1 element; path asks for index 1. Conservative:
+        // don't pad, leave the sequence as-is.
+        let existing = "\
+servers:
+  - name: keep
+    port: 1
+";
+        let incoming = "\
+servers:
+  - name: first
+  - name: second
+";
+        let merged = merge(Some(existing), incoming, &["servers[1]"]);
+        let v: Value = serde_yaml::from_str(&merged).unwrap();
+        assert_eq!(
+            v["servers"].as_sequence().unwrap().len(),
+            1,
+            "must not pad: {merged}"
+        );
+        assert_eq!(v["servers"][0]["name"], Value::String("keep".into()));
+    }
+
+    #[test]
+    fn merge_refuses_to_clobber_non_sequence_at_index_path() {
+        // Existing has `servers` as a mapping (wrong shape). Path
+        // `servers[0]` must NOT clobber the mapping.
+        let existing = "\
+servers:
+  not-a-sequence: true
+";
+        let incoming = "\
+servers:
+  - name: a
+";
+        let merged = merge(Some(existing), incoming, &["servers[0]"]);
+        let v: Value = serde_yaml::from_str(&merged).unwrap();
+        // mapping survives — no sequence created.
+        assert_eq!(v["servers"]["not-a-sequence"], Value::Bool(true));
+        assert!(
+            !v["servers"].is_sequence(),
+            "non-sequence must NOT be clobbered: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_can_address_field_inside_sequence_element() {
+        // `servers[0].name` replaces only the `name` of element 0,
+        // leaving sibling keys (and other elements) alone.
+        let existing = "\
+servers:
+  - name: old
+    port: keep
+  - name: consumer
+";
+        let incoming = "\
+servers:
+  - name: new
+    port: replaced
+";
+        let merged = merge(Some(existing), incoming, &["servers[0].name"]);
+        let v: Value = serde_yaml::from_str(&merged).unwrap();
+        assert_eq!(v["servers"][0]["name"], Value::String("new".into()));
+        // port was NOT in the path → keep existing
+        assert_eq!(v["servers"][0]["port"], Value::String("keep".into()));
+        // element 1 untouched
+        assert_eq!(v["servers"][1]["name"], Value::String("consumer".into()));
+    }
+
+    #[test]
+    fn merge_can_replace_scalar_sequence_element() {
+        // YAML sequences are uniform — `tags[0]` should work even
+        // when the element is a string, not a mapping.
+        let existing = "tags:\n  - old\n  - keep\n";
+        let incoming = "tags:\n  - new\n";
+        let merged = merge(Some(existing), incoming, &["tags[0]"]);
+        let v: Value = serde_yaml::from_str(&merged).unwrap();
+        assert_eq!(v["tags"][0], Value::String("new".into()));
+        assert_eq!(v["tags"][1], Value::String("keep".into()));
+    }
+
+    #[test]
+    fn merge_sequence_index_is_idempotent() {
+        let existing = "\
+servers:
+  - name: a
+    port: 1
+  - name: consumer
+";
+        let incoming = "\
+servers:
+  - name: a
+    port: 1
+";
+        let first = merge(Some(existing), incoming, &["servers[0]"]);
+        let second = merge(Some(&first), incoming, &["servers[0]"]);
+        assert_eq!(first, second, "sequence-index merge must be idempotent");
+    }
+
+    #[test]
+    fn regex_can_target_specific_sequence_element() {
+        let existing = "\
+servers:
+  - name: old
+  - name: consumer
+";
+        let incoming = "\
+servers:
+  - name: new
+";
+        let merged = merge(Some(existing), incoming, &[r"//^servers\[0\]$//"]);
+        let v: Value = serde_yaml::from_str(&merged).unwrap();
+        assert_eq!(v["servers"][0]["name"], Value::String("new".into()));
+        assert_eq!(v["servers"][1]["name"], Value::String("consumer".into()));
+    }
+
+    #[test]
+    fn collect_dotted_paths_skips_root_level_sequence() {
+        // Gemini #110 regression: a YAML document whose root is a
+        // sequence must NOT have `[0]`, `[1]`, ... emitted as
+        // top-level paths — `parse_segments` rejects the bare
+        // bracket form (empty name before `[`) and
+        // `value_at_path` / `set_at_path` both require the root to
+        // be a mapping. Skipping aligns the path enumeration with
+        // those invariants instead of synthesising unparseable
+        // paths.
+        let val: Value = serde_yaml::from_str("- name: a\n- name: b\n").unwrap();
+        let mut paths = Vec::new();
+        collect_dotted_paths(&val, "", &mut paths);
+        assert!(
+            paths.is_empty(),
+            "root-level sequence must not emit paths: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn collect_dotted_paths_emits_sequence_index_forms() {
+        let val: Value = serde_yaml::from_str(
+            "\
+servers:
+  - name: a
+  - name: b
+",
+        )
+        .unwrap();
+        let mut paths = Vec::new();
+        collect_dotted_paths(&val, "", &mut paths);
+        assert!(paths.iter().any(|p| p == "servers"));
+        assert!(paths.iter().any(|p| p == "servers[0]"));
+        assert!(paths.iter().any(|p| p == "servers[1]"));
+        assert!(
+            paths.iter().any(|p| p == "servers[0].name"),
+            "inside-element path: {paths:?}"
+        );
     }
 
     #[test]
