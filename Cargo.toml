@@ -62,7 +62,7 @@ jiff = { version = "0.2.24", features = ["serde"] }
 # UI
 inquire = "0.9.4"
 indicatif = "0.18.4"
-similar = "3.1.0"
+similar = "3.1.1"
 owo-colors = "4.3.0"
 
 # Hashing / glob / regex
