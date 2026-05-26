@@ -57,7 +57,7 @@ camino = { version = "1.2.2", features = ["serde1"] }
 directories = "6.0.0"
 
 # Time
-jiff = { version = "0.2.26", features = ["serde"] }
+jiff = { version = "0.2.27", features = ["serde"] }
 
 # UI
 inquire = "0.9.4"
