@@ -84,6 +84,30 @@ kata list
 The `<source>:<preset-name>` syntax is the same Terraform-module-style
 spec [described in AGENTS.md](./AGENTS.md): `<source>[@<rev>][//<subdir>][:<preset-name>]`.
 
+## Global config
+
+`~/.config/kata/config.toml` holds tool defaults under `[defaults]`
+(plus the `[[project]]` registry). Auto-update knobs:
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `auto_update` | `"off"` / `"notify"` / `"install"` | `"install"` | Background update behaviour at the start of each command. `install` (default) silently downloads + swaps the binary; the running process keeps the old binary and the new version applies on the next launch (one stderr line is printed only when an install happened). `notify` prints a banner pointing at `kata self-update` and never installs. `off` does nothing. Network / lock failures are swallowed silently; dev builds are never updated |
+| `update_check_interval` | duration string (`"24h"`, `"6h"`, `"1d"`) | `"24h"` | Minimum interval between background checks (humantime format). The last-check timestamp is persisted under kata's cache dir. Invalid values fall back to `"24h"` |
+
+```toml
+[defaults]
+auto_update = "install"      # off | notify | install
+# update_check_interval = "24h"
+```
+
+Set `KATA_NO_AUTOUPDATE=1` in the environment to disable the
+background check for a single invocation — it overrides `auto_update`
+to `off` regardless of config. (Non-empty and not `0` / `false`.)
+
+Run `kata self-update [--yes] [--check]` to update on demand: `--yes`
+skips the confirmation prompt, `--check` reports availability without
+installing.
+
 ## Companion repos
 
 | Repo | Role |

@@ -8,6 +8,7 @@ pub mod init;
 pub mod list;
 pub mod register;
 pub mod remove;
+pub mod self_update;
 pub mod status;
 pub mod unregister;
 pub mod update;

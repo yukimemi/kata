@@ -20,6 +20,31 @@ pub struct GlobalConfig {
     pub projects: Vec<ProjectEntry>,
 }
 
+/// How kata reacts to a newer GitHub release when a background
+/// update check runs at the start of each command.
+///
+/// - `off` — no background check, no install (set `KATA_NO_AUTOUPDATE`
+///   in the environment for a one-shot, config-independent opt-out).
+/// - `notify` — check only; print a banner pointing at
+///   `kata self-update` when a newer release exists. Never installs.
+/// - `install` (default) — silently download and swap the binary in
+///   the background. The running process keeps the old binary; the
+///   new version applies on the next launch.
+///
+/// All network / lock failures are swallowed silently (resilience),
+/// and development builds are never updated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoUpdateMode {
+    /// No background check, no install.
+    Off,
+    /// Check only; print a banner, never install.
+    Notify,
+    /// Silently self-install in the background (default).
+    #[default]
+    Install,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Defaults {
     #[serde(default)]
@@ -28,6 +53,16 @@ pub struct Defaults {
     pub ai_concurrency: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pj_concurrency: Option<usize>,
+    /// Background auto-update behaviour. Defaults to `install`
+    /// (opt-out silent self-update). The `KATA_NO_AUTOUPDATE` env
+    /// var overrides this to `off` for a single invocation.
+    #[serde(default)]
+    pub auto_update: AutoUpdateMode,
+    /// Minimum interval between background update checks (humantime
+    /// format: `"24h"`, `"6h"`, `"1d"`). Unset → 24h. Invalid values
+    /// fall back to 24h.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_check_interval: Option<String>,
 }
 
 impl Default for Defaults {
@@ -36,7 +71,20 @@ impl Default for Defaults {
             default_agent: AgentKind::default(),
             ai_concurrency: default_ai_concurrency(),
             pj_concurrency: None,
+            auto_update: AutoUpdateMode::default(),
+            update_check_interval: None,
         }
+    }
+}
+
+impl Defaults {
+    /// Resolve the configured auto-update mode. A single chokepoint so
+    /// any future config-level folding logic lives in one place. The
+    /// `KATA_NO_AUTOUPDATE` env kill-switch override is applied
+    /// separately in `updater::resolve_mode`, not here.
+    #[must_use]
+    pub fn update_mode(&self) -> AutoUpdateMode {
+        self.auto_update
     }
 }
 
@@ -182,5 +230,68 @@ mod tests {
         let mut c = GlobalConfig::default();
         let err = c.remove_project("missing").unwrap_err();
         assert!(matches!(err, Error::PjUnknown(_)));
+    }
+
+    // ---- auto_update --------------------------------------------------
+
+    #[test]
+    fn auto_update_defaults_to_install_when_defaults_absent() {
+        // No `[defaults]` section at all → whole config defaults.
+        let c: GlobalConfig = toml::from_str("").unwrap();
+        assert_eq!(c.defaults.auto_update, AutoUpdateMode::Install);
+        // Construct-vs-parse parity: the hand-written impl Default must agree.
+        assert_eq!(
+            GlobalConfig::default().defaults.auto_update,
+            AutoUpdateMode::Install
+        );
+    }
+
+    #[test]
+    fn auto_update_defaults_to_install_when_present_but_unset() {
+        // `[defaults]` present but `auto_update` omitted.
+        let c: GlobalConfig = toml::from_str("[defaults]\nai_concurrency = 8\n").unwrap();
+        assert_eq!(c.defaults.auto_update, AutoUpdateMode::Install);
+    }
+
+    #[test]
+    fn auto_update_parses_each_variant() {
+        for (raw, want) in [
+            ("off", AutoUpdateMode::Off),
+            ("notify", AutoUpdateMode::Notify),
+            ("install", AutoUpdateMode::Install),
+        ] {
+            let c: GlobalConfig =
+                toml::from_str(&format!("[defaults]\nauto_update = \"{raw}\"\n")).unwrap();
+            assert_eq!(c.defaults.auto_update, want, "parsing {raw:?}");
+        }
+    }
+
+    #[test]
+    fn update_mode_resolver_returns_field() {
+        let mut d = Defaults::default();
+        assert_eq!(d.update_mode(), AutoUpdateMode::Install);
+        d.auto_update = AutoUpdateMode::Off;
+        assert_eq!(d.update_mode(), AutoUpdateMode::Off);
+        d.auto_update = AutoUpdateMode::Notify;
+        assert_eq!(d.update_mode(), AutoUpdateMode::Notify);
+    }
+
+    #[test]
+    fn auto_update_round_trips_through_save_format() {
+        // Defaults derives Serialize and is written back by save(); make sure
+        // a parsed mode survives a serialize → deserialize round-trip.
+        let c: GlobalConfig = toml::from_str("[defaults]\nauto_update = \"notify\"\n").unwrap();
+        let body = toml::to_string_pretty(&c).unwrap();
+        let back: GlobalConfig = toml::from_str(&body).unwrap();
+        assert_eq!(back.defaults.auto_update, AutoUpdateMode::Notify);
+    }
+
+    #[test]
+    fn update_check_interval_defaults_to_none_and_parses() {
+        let c: GlobalConfig = toml::from_str("[defaults]\n").unwrap();
+        assert_eq!(c.defaults.update_check_interval, None);
+        let c: GlobalConfig =
+            toml::from_str("[defaults]\nupdate_check_interval = \"12h\"\n").unwrap();
+        assert_eq!(c.defaults.update_check_interval.as_deref(), Some("12h"));
     }
 }
