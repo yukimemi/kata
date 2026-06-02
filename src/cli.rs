@@ -374,6 +374,26 @@ pub enum Command {
         /// bash | zsh | fish | powershell | elvish
         shell: Shell,
     },
+
+    /// Update the kata binary to the latest GitHub release.
+    ///
+    /// Detects the install method (cargo / direct binary / dev build)
+    /// and dispatches accordingly. kata also auto-updates in the
+    /// background by default (`defaults.auto_update = "install"`);
+    /// this subcommand is the explicit, foreground path.
+    ///
+    /// Examples:
+    ///   kata self-update            # prompt, then update
+    ///   kata self-update --yes      # update without confirmation
+    ///   kata self-update --check    # report availability only
+    SelfUpdate {
+        /// Skip the confirmation prompt and update immediately.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Report whether an update is available without installing.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 /// Fold the `--ai <kind>` choice and the `--no-ai` shortcut into
@@ -390,6 +410,33 @@ impl Cli {
     pub async fn run(self) -> Result<()> {
         let interactive = !self.non_interactive;
         let no_color = self.no_color;
+        let non_interactive = self.non_interactive;
+
+        // Spawn the background auto-update check in parallel with the
+        // command, except for `self-update` (redundant) and
+        // `completion` (its stdout is consumed by the shell, so any
+        // banner would be noise). The handle is finalized after the
+        // command runs, regardless of how the command arm returned.
+        let auto_update_handle = match &self.command {
+            Command::SelfUpdate { .. } | Command::Completion { .. } => None,
+            _ => crate::updater::maybe_spawn_auto_update_check().await,
+        };
+
+        let result = self.dispatch(interactive, no_color, non_interactive).await;
+
+        if let Some(handle) = auto_update_handle {
+            crate::updater::finalize_auto_update_check(handle).await;
+        }
+
+        result
+    }
+
+    async fn dispatch(
+        self,
+        interactive: bool,
+        no_color: bool,
+        non_interactive: bool,
+    ) -> Result<()> {
         match self.command {
             Command::Init {
                 preset,
@@ -539,6 +586,9 @@ impl Cli {
                 let mut c = Cli::command();
                 clap_complete::generate(shell, &mut c, "kata", &mut std::io::stdout());
                 Ok(())
+            }
+            Command::SelfUpdate { yes, check } => {
+                cmd::self_update::run(yes, check, non_interactive).await
             }
         }
     }
