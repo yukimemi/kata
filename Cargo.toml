@@ -31,7 +31,7 @@ tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "process"
 async-trait = "0.1.89"
 
 # Self-update (background auto-update + `kata self-update`)
-kaishin = "0.5.0"
+kaishin = "0.6.0"
 
 # CLI
 clap = { version = "4.6.1", features = ["derive", "env"] }
