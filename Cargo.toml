@@ -73,7 +73,7 @@ sha2 = "0.11"
 globset = "0.4.18"
 # Used by merge-toml / merge-yaml `paths` entries written in rvpm
 # `//.../` regex form; see #62.
-regex = "1.12.4"
+regex = "1.13.0"
 
 # Logging
 tracing = "0.1.44"
