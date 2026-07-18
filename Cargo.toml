@@ -53,7 +53,7 @@ toml_edit = "0.25.13"
 
 # Errors
 thiserror = "2.0.18"
-anyhow = "1.0.103"
+anyhow = "1.0.104"
 
 # Filesystem / paths
 camino = { version = "1.2.4", features = ["serde1"] }
