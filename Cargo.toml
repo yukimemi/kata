@@ -28,7 +28,7 @@ path = "src/lib.rs"
 [dependencies]
 # Async runtime + concurrency
 tokio = { version = "1.53.0", features = ["macros", "rt-multi-thread", "process", "fs", "sync", "io-util", "time"] }
-async-trait = "0.1.89"
+async-trait = "0.1.91"
 
 # Self-update (background auto-update + `kata self-update`)
 kaishin = "0.6.3"
