@@ -42,7 +42,7 @@ teravars = { version = "0.1.6", features = ["merge", "shell", "tracing"] }
 tera = "1.20.1"
 
 # Serialization
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_yaml = "0.9.34"
 # `preserve_order` keeps insertion order across deserialize → mutate →
 # serialize, so merge-json (#71) leaf-replacements don't shuffle
