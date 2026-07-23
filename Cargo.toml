@@ -39,7 +39,7 @@ clap_complete = "4.6.7"
 
 # Templating + vars (mandatory; do not reimplement)
 teravars = { version = "0.1.6", features = ["merge", "shell", "tracing"] }
-tera = "1.20.1"
+tera = "2.1.0"
 
 # Serialization
 serde = { version = "1.0.229", features = ["derive"] }
