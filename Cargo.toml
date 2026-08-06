@@ -34,7 +34,7 @@ async-trait = "0.1.91"
 kaishin = "0.6.4"
 
 # CLI
-clap = { version = "4.6.5", features = ["derive", "env"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
 clap_complete = "4.6.8"
 
 # Templating + vars (mandatory; do not reimplement)
