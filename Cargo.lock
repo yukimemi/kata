@@ -1555,7 +1555,7 @@ dependencies = [
  "sha2 0.11.0",
  "similar",
  "tempfile",
- "tera",
+ "tera 1.20.1",
  "teravars",
  "thiserror",
  "tokio",
@@ -2753,15 +2753,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "teravars"
-version = "0.1.6"
+name = "tera"
+version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fdcd9ead31eece24df20e5c7a082c2b04fff9426ba41e3875ef55ebc9c608fc"
+checksum = "638c0720e7c1f61722366256d369ea46139634e77738735d6d9bb287bbbad35f"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "teravars"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "443fe898f5f3e6bd9d5d1dcfb0cd02f8e63fc26f9f407b922157c97a80e1a50d"
 dependencies = [
  "dirs",
  "serde",
- "serde_json",
- "tera",
+ "tera 2.1.1",
  "thiserror",
  "toml",
  "tracing",
