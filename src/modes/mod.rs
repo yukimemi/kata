@@ -48,7 +48,7 @@ pub struct ActionContext<'a> {
     /// Current destination contents, if the file exists.
     pub current_body: Option<String>,
     pub vars: &'a toml::Table,
-    pub tera_ctx: &'a tera::Context,
+    pub tera_ctx: &'a teravars::Context,
     /// Resolved AI agent (only meaningful for `how = "ai"`).
     pub agent: Option<Arc<dyn AiAgent>>,
     /// Backend the agent (if any) is using. The `[h]andoff` arm in

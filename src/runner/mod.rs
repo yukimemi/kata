@@ -604,7 +604,7 @@ pub async fn apply_to_pj(
 fn render_dst(
     renderer: &mut Renderer,
     spec: &crate::manifest::FileSpec,
-    ctx: &tera::Context,
+    ctx: &teravars::Context,
 ) -> Result<String> {
     let raw = spec.dst_or_src();
     if !raw.contains("{{") && !raw.contains("{%") {
@@ -613,7 +613,7 @@ fn render_dst(
     renderer.render(raw, ctx)
 }
 
-fn eval_truthy(renderer: &mut Renderer, expr: &str, ctx: &tera::Context) -> Result<bool> {
+fn eval_truthy(renderer: &mut Renderer, expr: &str, ctx: &teravars::Context) -> Result<bool> {
     let wrapped = format!("{{% if {expr} %}}1{{% else %}}0{{% endif %}}");
     let out = renderer.render(&wrapped, ctx)?;
     Ok(out.trim() == "1")
@@ -921,7 +921,7 @@ fn normalize_relative_path(s: &str) -> String {
 fn render_or_passthrough(
     spec: &FileSpec,
     raw: String,
-    ctx: &tera::Context,
+    ctx: &teravars::Context,
     renderer: &mut Renderer,
 ) -> Result<String> {
     if spec.is_tera_source() {
