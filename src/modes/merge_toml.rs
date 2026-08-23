@@ -33,19 +33,22 @@
 //! `hooks.post_create[0]` lets the upstream template own only the
 //! first hook and the consumer freely append further
 //! `[[hooks.post_create]]` entries. Bootstrap: when the existing
-//! file has no `name` entry at all (or has it as an empty
-//! `ArrayOfTables`), kata creates / extends to index 0 only.
-//! Beyond that the conservative rule applies — if `idx >= len` for
-//! an existing non-empty array, the path is a silent no-op rather
-//! than padding empty tables.
+//! file has no `name` entry at all, kata creates it at index 0
+//! only. From there an index exactly one past the end appends, so
+//! a layer owning `[0]`, `[1]`, `[2]` grows the array in order on
+//! top of a lower layer that shipped only `[0]`. A gap is still
+//! refused — `idx > len` is a silent no-op rather than padding
+//! empty tables to reach it. That makes the order of `paths`
+//! load-bearing: list the indices ascending, since `[2]` applied
+//! before `[1]` lands on the gap rule and is dropped.
 //!
 //! **Inline array indexing (#111)**: the same `name[idx]` form
 //! also addresses elements of an *inline* array
 //! (`Item::Value(Value::Array(_))`) — `tags = ["a", "b"]`,
-//! `dependencies = ["fmt", "clippy"]`, and so on. Same conservative
-//! rules as the AoT case: bootstrap only at `idx == 0` when the
-//! entry is missing or empty, refuse to clobber a non-array slot,
-//! no-op on out-of-range indices. The setter dispatches on the
+//! `dependencies = ["fmt", "clippy"]`, and so on. Same rules as the
+//! AoT case: bootstrap at `idx == 0` when the entry is missing,
+//! append at `idx == len`, refuse a gap at `idx > len`, and refuse
+//! to clobber a non-array slot. The setter dispatches on the
 //! incoming `Item` variant — `Item::Table` → AoT; `Item::Value` →
 //! inline array — so a shape mismatch (existing is AoT but
 //! incoming is inline, or vice versa) naturally bails out without
@@ -401,11 +404,12 @@ fn item_at_table_path(table: &Table, path: &[PathSeg]) -> Option<Item> {
 
 /// Set the value at a path, creating intermediate **missing**
 /// `Table`s and bootstrap `ArrayOfTables` (index 0 only) as needed.
+/// An index one past the end of an existing array appends to it.
 /// Refuses to clobber slots that already hold a wrong-shape item:
 /// a `Key` step against an existing non-table, a `KeyIndex` step
-/// against an existing non-array-of-tables, or a `KeyIndex` with
-/// out-of-range index on a non-empty existing array all silently
-/// no-op rather than rewriting unrelated structure.
+/// against an existing non-array-of-tables, or a `KeyIndex` whose
+/// index would leave a gap all silently no-op rather than
+/// rewriting unrelated structure.
 fn set_at_path(doc: &mut DocumentMut, path: &[PathSeg], value: Item) {
     set_in_table(doc.as_table_mut(), path, value);
 }
@@ -487,10 +491,11 @@ fn set_in_table(table: &mut Table, path: &[PathSeg], value: Item) {
 /// - key present, not an `ArrayOfTables` → no-op (refuse to
 ///   clobber unrelated structure, same contract as `Key`'s table
 ///   intermediate)
-/// - key present, empty array AND `idx == 0` → push one fresh
-///   `Table` and return it (bootstrap of an already-emptied array)
 /// - key present, `idx < len` → return element `idx`
-/// - any other out-of-range case → no-op
+/// - key present, `idx == len` → push one fresh `Table` and
+///   return it (this also covers an already-emptied array)
+/// - key present, `idx > len` → no-op (padding a gap would mean
+///   inventing the tables in between)
 fn ensure_aot_element<'a>(table: &'a mut Table, key: &str, idx: usize) -> Option<&'a mut Table> {
     match table.entry(key) {
         toml_edit::Entry::Vacant(slot) => {
@@ -508,15 +513,20 @@ fn ensure_aot_element<'a>(table: &'a mut Table, key: &str, idx: usize) -> Option
             // lifetime; `get_mut` would borrow from the entry and
             // can't escape this arm.
             let aot = slot.into_mut().as_array_of_tables_mut()?;
-            if aot.is_empty() {
-                if idx != 0 {
-                    return None;
-                }
-                aot.push(Table::new());
-                return aot.get_mut(0);
-            }
-            if idx >= aot.len() {
+            // Exactly one past the end appends. Layered templates
+            // grow the same array in order — pj-base owning
+            // `hooks.post_create[0]` and the layer above it owning
+            // `[0]`, `[1]`, `[2]` — and refusing to extend by one
+            // would silently drop every element past the first,
+            // leaving the consumer with a half-applied chain and
+            // nothing said about it. A gap is still refused: at
+            // `idx > len` there is no element to write without
+            // inventing the ones in between.
+            if idx > aot.len() {
                 return None;
+            }
+            if idx == aot.len() {
+                aot.push(Table::new());
             }
             aot.get_mut(idx)
         }
@@ -532,10 +542,10 @@ fn ensure_aot_element<'a>(table: &'a mut Table, key: &str, idx: usize) -> Option
 /// - key present, not an inline array → no-op (refuse-to-clobber;
 ///   covers the shape mismatch where existing is `ArrayOfTables`
 ///   but incoming is inline)
-/// - key present, empty array AND `idx == 0` → push a placeholder
-///   and return a borrow to it
 /// - key present, `idx < len` → return slot `idx`
-/// - any other out-of-range case → no-op
+/// - key present, `idx == len` → push a placeholder and return a
+///   borrow to it (this also covers an already-emptied array)
+/// - key present, `idx > len` → no-op
 ///
 /// The placeholder (`Value::from(0i64)`) is overwritten by the
 /// caller before `.to_string()` runs, so its choice doesn't show
@@ -554,15 +564,14 @@ fn ensure_array_element<'a>(table: &'a mut Table, key: &str, idx: usize) -> Opti
         }
         toml_edit::Entry::Occupied(slot) => {
             let arr = slot.into_mut().as_array_mut()?;
-            if arr.is_empty() {
-                if idx != 0 {
-                    return None;
-                }
-                arr.push(Value::from(0i64));
-                return arr.get_mut(0);
-            }
-            if idx >= arr.len() {
+            // One past the end appends, a gap does not — the same
+            // rule `ensure_aot_element` follows, for the same
+            // layered-template reason.
+            if idx > arr.len() {
                 return None;
+            }
+            if idx == arr.len() {
+                arr.push(Value::from(0i64));
             }
             arr.get_mut(idx)
         }
@@ -897,31 +906,6 @@ cmd = \"cargo make on-add\"
     }
 
     #[test]
-    fn merge_skips_out_of_range_index_on_shorter_array() {
-        // Existing has 1 element; path asks for index 1 (i.e. one
-        // past the end). Conservative rule: don't pad, leave the
-        // array unchanged.
-        let existing = "\
-[[hooks.post_create]]
-cmd = \"keep\"
-";
-        let incoming = "\
-[[hooks.post_create]]
-cmd = \"first\"
-
-[[hooks.post_create]]
-cmd = \"second\"
-";
-        let merged = merge(Some(existing), incoming, &["hooks.post_create[1]"]);
-        // unchanged
-        assert!(merged.contains("cmd = \"keep\""));
-        assert!(
-            !merged.contains("cmd = \"second\""),
-            "must not pad / append: {merged}"
-        );
-    }
-
-    #[test]
     fn merge_skips_index_zero_against_non_array_intermediate() {
         // Existing has `hooks.post_create = "string"` (the wrong
         // shape). Path `hooks.post_create[0]` must NOT clobber the
@@ -1104,19 +1088,6 @@ dependencies = [\"cargo make fmt\"]
     }
 
     #[test]
-    fn merge_skips_out_of_range_index_on_shorter_inline_array() {
-        let existing = "deps = [\"keep\"]\n";
-        let incoming = "deps = [\"first\", \"second\"]\n";
-        let merged = merge(Some(existing), incoming, &["deps[1]"]);
-        // unchanged — conservative no-pad
-        assert!(merged.contains("\"keep\""));
-        assert!(
-            !merged.contains("\"second\""),
-            "must not pad / append: {merged}"
-        );
-    }
-
-    #[test]
     fn merge_refuses_to_clobber_non_array_at_inline_index_path() {
         // Existing has `tags` as a scalar (wrong shape). Path
         // `tags[0]` must not clobber the scalar.
@@ -1231,6 +1202,137 @@ note = \"add\"
         assert!(
             merged.contains("only_in_incoming") && merged.contains("note = \"add\""),
             "incoming-only key (matching regex) must be added: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_appends_index_one_past_the_end() {
+        // Existing has 1 element; the path asks for index 1,
+        // exactly one past the end. That appends: a layer owning
+        // `[1]` on top of a layer that shipped only `[0]` has to be
+        // able to grow the array.
+        let existing = "\
+[[hooks.post_create]]
+cmd = \"keep\"
+";
+        let incoming = "\
+[[hooks.post_create]]
+cmd = \"first\"
+
+[[hooks.post_create]]
+cmd = \"second\"
+";
+        let merged = merge(Some(existing), incoming, &["hooks.post_create[1]"]);
+        assert!(
+            merged.contains("cmd = \"keep\""),
+            "element 0 is not in `paths` and must survive: {merged}"
+        );
+        assert!(
+            merged.contains("cmd = \"second\""),
+            "one past the end must append: {merged}"
+        );
+        assert!(
+            !merged.contains("cmd = \"first\""),
+            "element 0 was not requested and must not be copied: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_skips_index_that_would_leave_a_gap() {
+        // Existing has 1 element; the path asks for index 2.
+        // Reaching it would mean inventing element 1, so this stays
+        // the no-op it always was.
+        let existing = "\
+[[hooks.post_create]]
+cmd = \"keep\"
+";
+        let incoming = "\
+[[hooks.post_create]]
+cmd = \"first\"
+
+[[hooks.post_create]]
+cmd = \"second\"
+
+[[hooks.post_create]]
+cmd = \"third\"
+";
+        let merged = merge(Some(existing), incoming, &["hooks.post_create[2]"]);
+        assert!(merged.contains("cmd = \"keep\""));
+        assert!(
+            !merged.contains("cmd = \"third\""),
+            "must not pad to reach a gapped index: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_grows_a_one_element_array_through_the_whole_chain() {
+        // The layered case the rule exists for: the lower layer
+        // shipped one hook, the layer above owns three. Applying
+        // `[0]`, `[1]`, `[2]` in one pass has to land all three.
+        let existing = "\
+# consumer comment
+[ui]
+show_pr = true
+
+[[hooks.post_create]]
+cmd = \"from-base\"
+";
+        let incoming = "\
+[[hooks.post_create]]
+cmd = \"first\"
+
+[[hooks.post_create]]
+cmd = \"second\"
+
+[[hooks.post_create]]
+cmd = \"third\"
+";
+        let merged = merge(
+            Some(existing),
+            incoming,
+            &[
+                "hooks.post_create[0]",
+                "hooks.post_create[1]",
+                "hooks.post_create[2]",
+            ],
+        );
+        for cmd in ["first", "second", "third"] {
+            assert!(
+                merged.contains(&format!("cmd = \"{cmd}\"")),
+                "{cmd} must be applied: {merged}"
+            );
+        }
+        assert!(
+            !merged.contains("from-base"),
+            "element 0 is owned by the template and must be replaced: {merged}"
+        );
+        assert!(
+            merged.contains("show_pr = true") && merged.contains("# consumer comment"),
+            "keys and comments outside `paths` must survive: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_appends_one_past_the_end_of_an_inline_array() {
+        let existing = "deps = [\"keep\"]\n";
+        let incoming = "deps = [\"first\", \"second\"]\n";
+        let merged = merge(Some(existing), incoming, &["deps[1]"]);
+        assert!(merged.contains("\"keep\""), "slot 0 preserved: {merged}");
+        assert!(
+            merged.contains("\"second\""),
+            "one past the end must append: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_skips_gapped_index_on_shorter_inline_array() {
+        let existing = "deps = [\"keep\"]\n";
+        let incoming = "deps = [\"first\", \"second\", \"third\"]\n";
+        let merged = merge(Some(existing), incoming, &["deps[2]"]);
+        assert!(merged.contains("\"keep\""));
+        assert!(
+            !merged.contains("\"third\""),
+            "must not pad to reach a gapped index: {merged}"
         );
     }
 }
