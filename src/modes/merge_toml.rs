@@ -71,7 +71,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
+use toml_edit::{Array, ArrayOfTables, Decor, DocumentMut, Item, Table, Value};
 
 use super::merge_path::{PathSeg, PathSpec, parse_path_spec, parse_segments, shallowest_matches};
 
@@ -204,15 +204,16 @@ fn compute_merged(ctx: &ActionContext<'_>) -> Result<String> {
 
     Ok(existing_doc.to_string())
 }
-
 /// Copy the value at one literal dotted path from `incoming_doc`
 /// into `existing_doc`. Empty segments (e.g. trailing dot, leading
 /// dot, `a..b`) and malformed `name[idx]` brackets are errors so
 /// the manifest author hears about a malformed path instead of
 /// getting a silent no-op. Pure no-ops (incoming and existing
-/// already equivalent at the path) skip the assignment entirely —
-/// see the kata#34 comment below on why that matters for
-/// interleaved consumer keys.
+/// already equivalent at the path) skip the value assignment
+/// entirely — see the kata#34 comment below on why that matters for
+/// interleaved consumer keys — but still carry a missing key
+/// comment (`set_leaf_key_decor`), so a renovate-style pin is never
+/// left behind the first time the template adds it.
 fn copy_one_path(
     existing_doc: &mut DocumentMut,
     incoming_doc: &DocumentMut,
@@ -223,25 +224,115 @@ fn copy_one_path(
     if segments.is_empty() {
         return Ok(());
     }
-    if let Some(value) = item_at_path(incoming_doc.as_item(), &segments) {
-        // If the existing file already has the same value at
-        // this path, skip the assignment entirely. toml_edit's
-        // emit after `Table::insert` / value-replace on an
-        // existing key can shuffle the entry relative to
-        // interleaved consumer keys, even when the value
-        // didn't change — kata#34. Comparing serialised forms
-        // (rather than `Item` equality) ignores attached decor
-        // (comments, blank lines, key style) and catches the
-        // pure-no-op case reliably.
-        let already_matches = item_at_path(existing_doc.as_item(), &segments)
-            .as_ref()
-            .is_some_and(|cur| items_equivalent(cur, &value));
-        if !already_matches {
-            set_at_path(existing_doc, &segments, value);
-        }
+    let Some(value) = item_at_path(incoming_doc.as_item(), &segments) else {
+        return Ok(()); // path absent in incoming → leave existing untouched
+    };
+    let incoming_decor = incoming_leaf_decor(incoming_doc.as_item(), &segments);
+
+    // If the existing file already has the same value at this path,
+    // skip the value assignment entirely — toml_edit's emit after a
+    // replace can shuffle the entry relative to interleaved consumer
+    // keys even for an identical value (kata#34). A missing key
+    // comment is still a real diff though, so write it separately.
+    let already_matches = item_at_path(existing_doc.as_item(), &segments)
+        .as_ref()
+        .is_some_and(|cur| items_equivalent(cur, &value));
+    if already_matches {
+        set_leaf_key_decor(existing_doc, &segments, &incoming_decor);
+    } else {
+        set_at_path(existing_doc, &segments, value, incoming_decor);
     }
-    // path absent in incoming → leave existing untouched
     Ok(())
+}
+
+/// Copy the incoming key's comment decor onto the existing leaf key
+/// when the values already match. Guards on the consumer's own
+/// comment: if the existing key already has a `# ...` prefix it is
+/// left alone.
+fn set_leaf_key_decor(doc: &mut DocumentMut, path: &[PathSeg], decor: &Option<Decor>) {
+    let Some(decor) = decor else {
+        return;
+    };
+    let Some(PathSeg::Key(k)) = path.last() else {
+        return;
+    };
+
+    // Walk down to the PARENT table of the leaf key WITH MUTABLE
+    // borrows of the live document (item_at_path returns clones, so
+    // writing a clone would mutate nothing). `path[..len-1]` are the
+    // intermediate Key segments; only `Table` can continue, exactly
+    // like item_at_table_path.
+    let keys: Vec<&str> = path[..path.len() - 1]
+        .iter()
+        .filter_map(|s| match s {
+            PathSeg::Key(k) => Some(k.as_str()),
+            PathSeg::KeyIndex(..) => None,
+        })
+        .collect();
+    let Some(parent) = table_at_path_mut(doc.as_table_mut(), &keys) else {
+        return;
+    };
+    let Some(mut km) = parent.get_key_value_mut(k.as_str()).map(|(km, _)| km) else {
+        return;
+    };
+    let has_own = km
+        .leaf_decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    if !has_own {
+        *km.leaf_decor_mut() = decor.clone();
+    }
+}
+
+/// Descend a run of Key segments through mutable `Table`s, returning
+/// the parent of the leaf key. Returns None if a segment is missing or
+/// resolves to a non-table (refuse-to-clobber, same as set_in_table).
+fn table_at_path_mut<'a>(table: &'a mut Table, keys: &[&str]) -> Option<&'a mut Table> {
+    let mut cur = table;
+    for k in keys {
+        cur = cur.get_mut(k).and_then(|item| item.as_table_mut())?;
+    }
+    Some(cur)
+}
+
+/// The comment decor (a `# ...` line that precedes the path's leaf
+/// key in the incoming template body), when that key carries one.
+///
+/// merge-toml copies a value `Item`, and a value carries no key decor,
+/// so the renovate-style `# datasource=...` pin above an action pin is
+/// otherwise orphaned by every value write to the same key. Return it
+/// when the incoming key has a real comment prefix — plain white-space
+/// is the bare ` = ` we reproduce ourselves and renders as no comment.
+fn incoming_leaf_decor(item: &Item, path: &[PathSeg]) -> Option<Decor> {
+    let Some(PathSeg::Key(leaf_key)) = path.last() else {
+        return None; // array-indexed leaf: no key comment to carry
+    };
+
+    // Descend to the PARENT of the leaf key, not the leaf value, and
+    // read the key's decor from the table that owns it. `item_at_path`
+    // on the prefix walks Key / KeyIndex the same way the writer does,
+    // so the two stay in step.
+    let parent = if path.len() > 1 {
+        item_at_path(item, &path[..path.len() - 1])?
+    } else {
+        item.clone()
+    };
+    let Item::Table(table) = parent else {
+        return None;
+    };
+    let decor = table
+        .get_key_value(leaf_key.as_str())
+        .map(|(k, _)| k.leaf_decor().clone())?;
+    if decor
+        .prefix()
+        .and_then(|p| p.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        Some(decor)
+    } else {
+        None
+    }
 }
 
 /// Recursively collect every dotted path in `item`, recording
@@ -410,11 +501,11 @@ fn item_at_table_path(table: &Table, path: &[PathSeg]) -> Option<Item> {
 /// against an existing non-array-of-tables, or a `KeyIndex` whose
 /// index would leave a gap all silently no-op rather than
 /// rewriting unrelated structure.
-fn set_at_path(doc: &mut DocumentMut, path: &[PathSeg], value: Item) {
-    set_in_table(doc.as_table_mut(), path, value);
+fn set_at_path(doc: &mut DocumentMut, path: &[PathSeg], value: Item, key_decor: Option<Decor>) {
+    set_in_table(doc.as_table_mut(), path, value, key_decor);
 }
 
-fn set_in_table(table: &mut Table, path: &[PathSeg], value: Item) {
+fn set_in_table(table: &mut Table, path: &[PathSeg], value: Item, key_decor: Option<Decor>) {
     let Some((head, rest)) = path.split_first() else {
         return;
     };
@@ -428,17 +519,35 @@ fn set_in_table(table: &mut Table, path: &[PathSeg], value: Item) {
                 // consumer keys (yukimemi/kata#34). Assigning
                 // through `get_mut` replaces the value but
                 // preserves position and surrounding decor.
-                if let Some(existing) = table.get_mut(k) {
+                let existing = table.get_mut(k);
+                if let Some(existing) = existing {
                     *existing = value;
                 } else {
                     table.insert(k, value);
+                }
+                // The value item never carries the key's decor, so a
+                // comment above the key (the `# renovate:` pin on a
+                // vars.toml action, say) is orphaned by any write to
+                // the same key. Restore the template's key decor when
+                // the key has no comment of its own to keep.
+                if let Some(decor) = key_decor {
+                    if let Some(mut km) = table.key_mut(k) {
+                        let has_own = km
+                            .leaf_decor()
+                            .prefix()
+                            .and_then(|p| p.as_str())
+                            .is_some_and(|s| !s.trim().is_empty());
+                        if !has_own {
+                            *km.leaf_decor_mut() = decor;
+                        }
+                    }
                 }
             } else {
                 let entry = table.entry(k).or_insert_with(|| Item::Table(Table::new()));
                 let Some(next) = entry.as_table_mut() else {
                     return; // existing non-table intermediate — refuse to clobber
                 };
-                set_in_table(next, rest, value);
+                set_in_table(next, rest, value, key_decor);
             }
         }
         PathSeg::KeyIndex(k, i) => {
@@ -475,7 +584,7 @@ fn set_in_table(table: &mut Table, path: &[PathSeg], value: Item) {
                 let Some(elem) = ensure_aot_element(table, k, *i) else {
                     return;
                 };
-                set_in_table(elem, rest, value);
+                set_in_table(elem, rest, value, key_decor);
             }
         }
     }
@@ -1333,6 +1442,47 @@ cmd = \"third\"
         assert!(
             !merged.contains("\"third\""),
             "must not pad to reach a gapped index: {merged}"
+        );
+    }
+    // Value already current but the key carries no comment yet — the
+    // value write is skipped (kata#34), but the template's comment
+    // must still be adopted so a renovate pin propagates onto a
+    // pre-seeded consumer.
+    #[test]
+    fn merge_adopts_key_comment_when_value_already_matches() {
+        let existing = "[actions]\nfoo = \"v2\"\nbar = \"keep\"\n";
+        let incoming = "\
+[actions]
+# renovate: datasource=github-tags depName=pj/action
+foo = \"v2\"
+";
+        let merged = merge(Some(existing), incoming, &["actions.foo"]);
+        assert!(
+            merged.contains("# renovate"),
+            "comment adopted on equal-value merge: {merged}"
+        );
+        assert!(
+            merged.contains("bar = \"keep\""),
+            "consumer key kept: {merged}"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_consumer_comment_when_value_matches() {
+        let existing = "[actions]\n# my pin\nfoo = \"v2\"\n";
+        let incoming = "\
+[actions]
+# renovate: datasource=github-tags depName=pj/action
+foo = \"v3\"
+";
+        let merged = merge(Some(existing), incoming, &["actions.foo"]);
+        assert!(
+            merged.contains("# my pin"),
+            "consumer comment kept: {merged}"
+        );
+        assert!(
+            !merged.contains("depName=pj/action"),
+            "upstream comment must not replace the consumer's: {merged}"
         );
     }
 }
