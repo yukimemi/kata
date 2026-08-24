@@ -37,14 +37,17 @@ impl ApplyMode for MergeSection {
             ComposeResult::Create(new_body) => Ok(ActionPlan {
                 kind: PlanKind::Create,
                 diff: Some(unified_diff("", &new_body, ctx.dst_abs.as_str())),
+                new_body: Some(new_body),
             }),
             ComposeResult::Unchanged => Ok(ActionPlan {
                 kind: PlanKind::Unchanged,
                 diff: None,
+                new_body: ctx.current_body.clone(),
             }),
             ComposeResult::Update { current, new_body } => Ok(ActionPlan {
                 kind: PlanKind::Update,
                 diff: Some(unified_diff(&current, &new_body, ctx.dst_abs.as_str())),
+                new_body: Some(new_body),
             }),
             ComposeResult::Diverged => Ok(ActionPlan {
                 kind: PlanKind::Diverged,
@@ -52,6 +55,7 @@ impl ApplyMode for MergeSection {
                     "(only one of `{}` / `{}` present in {} — fix manually)",
                     marker.begin, marker.end, ctx.dst_abs
                 )),
+                new_body: None,
             }),
         }
     }

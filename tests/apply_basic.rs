@@ -1585,3 +1585,127 @@ fn reapply_reports_unchanged_for_layered_always_entries_to_same_dst() {
         );
     }
 }
+
+#[test]
+fn status_reports_ok_for_layered_always_entries_to_same_dst() {
+    // Preview-side counterpart to issue #81. `kata status` planned each
+    // `[[file]]` entry against the bytes on disk, with no memory of what
+    // an earlier entry in the same run would have written. For a dst
+    // owned by two layers that meant every layer but the last was
+    // previewed against content it never sees at apply time.
+    //
+    // Canonical case: each pj-* layer ships the same
+    // `merge-json, paths = ["extends"]` entry naming ITSELF, and kata's
+    // compose rule (last layer wins) resolves `extends` to the topmost
+    // applied layer. `apply` therefore writes nothing on a re-run, but
+    // `status` reported the lower layer as `update` forever — a
+    // permanent phantom drift row that never cleared.
+    let td = TempDir::new().unwrap();
+    let templates = td.path().join("templates");
+
+    TemplateBuilder::new(templates.join("pj-base"))
+        .manifest(
+            r#"
+            name = "pj-base"
+            [[file]]
+            src = "renovate.json"
+            how = "merge-json"
+            when = "always"
+            paths = ["extends"]
+            "#,
+        )
+        .file(
+            "renovate.json",
+            "{\n  \"extends\": [\"github>o/pj-base\"]\n}\n",
+        );
+
+    TemplateBuilder::new(templates.join("pj-denops"))
+        .manifest(
+            r#"
+            name = "pj-denops"
+            [[file]]
+            src = "renovate.json"
+            how = "merge-json"
+            when = "always"
+            paths = ["extends"]
+            "#,
+        )
+        .file(
+            "renovate.json",
+            "{\n  \"extends\": [\"github>o/pj-denops\"]\n}\n",
+        );
+
+    let preset = write_preset(
+        td.path(),
+        "default",
+        r#"
+        name = "default"
+        [[templates]]
+        source = "../templates/pj-base"
+        [[templates]]
+        source = "../templates/pj-denops"
+        "#,
+    );
+    let pj = td.path().join("demo");
+
+    kata(td.path())
+        .args(["init"])
+        .arg(&preset)
+        .args(["--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+
+    // Last layer wins: the composed file names pj-denops.
+    let body = std::fs::read_to_string(pj.join("renovate.json")).unwrap();
+    assert!(
+        body.contains("pj-denops") && !body.contains("pj-base"),
+        "compose should resolve `extends` to the topmost layer: {body}"
+    );
+
+    let status_lines = |pj: &std::path::Path| -> Vec<String> {
+        let assertion = kata(td.path())
+            .args(["status", "--at"])
+            .arg(pj)
+            .arg("--non-interactive")
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).to_string();
+        stdout
+            .lines()
+            .filter(|line| line.contains("renovate.json"))
+            .map(str::to_string)
+            .collect()
+    };
+
+    // Nothing changed since apply, so neither layer may claim `update`.
+    let lines = status_lines(&pj);
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected one status line per layered entry, got:\n{lines:#?}"
+    );
+    for line in &lines {
+        assert!(
+            line.contains("ok"),
+            "layered always entries with zero net delta must preview as \
+             `ok`, got: {line}\nall lines:\n{lines:#?}"
+        );
+    }
+
+    // Guard the other direction: the collapse must not swallow real
+    // drift. A consumer edit that apply WOULD overwrite still reports
+    // `update`, because the composed end state no longer matches disk.
+    std::fs::write(
+        pj.join("renovate.json"),
+        "{\n  \"extends\": [\"github>o/something-else\"]\n}\n",
+    )
+    .unwrap();
+
+    let drifted = status_lines(&pj);
+    assert!(
+        drifted.iter().any(|line| line.contains("update")),
+        "real drift must still preview as `update`, got:\n{drifted:#?}"
+    );
+}

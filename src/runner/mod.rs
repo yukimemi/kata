@@ -690,6 +690,29 @@ pub async fn plan_pj(
     let mut renderer = Renderer::new();
 
     let mut out = Vec::new();
+
+    // Preview-side mirrors of the apply-run bookkeeping. `apply`
+    // composes layered entries against evolving disk state and then
+    // collapses zero-net-delta writes (#81/#85); a preview that reads
+    // the dst fresh for every entry disagrees with it whenever two
+    // layers target one dst. The canonical case is `renovate.json`:
+    // every pj-* layer ships the same `merge-json, paths = ["extends"]`
+    // entry naming itself, and the topmost applied layer wins. Read
+    // against disk, the lower layer's entry reports `update` forever
+    // even though `apply` reports `unchanged` and writes nothing.
+    //
+    // `simulated` holds the body each dst would carry after the last
+    // planned entry (`None` = would not exist). `initial_disk` keeps
+    // the pre-apply bytes for the net-delta pass.
+    let mut simulated: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let mut initial_disk: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    // Dsts an earlier entry in this preview would have created, so a
+    // later `when = "once"` entry doesn't mistake "pj-base just seeded
+    // it" for "the consumer pre-staged it" and report adoption. Mirrors
+    // `wrote_in_run` in the apply path. See #85.
+    let mut planned_in_run: std::collections::HashSet<String> = std::collections::HashSet::new();
     for handle in &handles {
         for spec in &handle.manifest.files {
             check_relative_contained(&spec.src, "template src")?;
@@ -698,9 +721,33 @@ pub async fn plan_pj(
             let dst_abs = pj_root.join(&dst_rel);
             let src_abs = handle.root.join(&spec.src);
 
+            let state_key = dst_rel.clone();
+
+            // Snapshot the pre-apply bytes the first time this dst is
+            // seen — before any earlier entry's simulated write — so
+            // the net-delta pass below has the same baseline the apply
+            // path uses. Non-regular files snapshot as `None` so the
+            // once-gate can emit its dedicated `Diverged` row rather
+            // than a generic I/O error.
+            if !initial_disk.contains_key(&state_key) {
+                let initial = if dst_abs.is_file() {
+                    read_existing_text(dst_abs.as_path())?
+                } else {
+                    None
+                };
+                initial_disk.insert(state_key.clone(), initial);
+            }
+
+            // Would the dst exist at this point in the run? An earlier
+            // entry's simulated body outranks what's on disk.
+            let exists_now = match simulated.get(&state_key) {
+                Some(body) => body.is_some(),
+                None => dst_abs.is_file(),
+            };
+
             // when handling
             if spec.when == WhenMode::Once {
-                if let Some(s) = applied.files.get(&dst_rel) {
+                if let Some(s) = applied.files.get(&state_key) {
                     if s.once_applied {
                         out.push((dst_rel, crate::modes::PlanKind::SkippedOnce, None));
                         continue;
@@ -709,15 +756,21 @@ pub async fn plan_pj(
                 // First-time apply but the consumer already has the
                 // file — `apply` will adopt it as-is. Mirror that in
                 // the preview so `kata status` doesn't promise an
-                // overwrite that won't happen. `is_file()` (not
-                // `exists()`) so a directory at `dst` shows up as
-                // `Diverged`, matching how the runner refuses to
-                // adopt non-regular files.
-                if dst_abs.is_file() {
+                // overwrite that won't happen.
+                //
+                // Skipped when an earlier entry in this same preview
+                // would have created the dst: the file is then kata's
+                // own seed rather than consumer content, and `apply`
+                // lets this entry's mode run instead of adopting.
+                // See #85.
+                if exists_now && !planned_in_run.contains(&state_key) {
                     out.push((dst_rel, crate::modes::PlanKind::AdoptedExisting, None));
                     continue;
                 }
-                if dst_abs.exists() {
+                // Exists but isn't a regular file (a directory, say) —
+                // `Diverged`, matching the runner's refusal to adopt
+                // non-regular destinations.
+                if !planned_in_run.contains(&state_key) && dst_abs.exists() && !dst_abs.is_file() {
                     out.push((dst_rel, crate::modes::PlanKind::Diverged, None));
                     continue;
                 }
@@ -741,7 +794,12 @@ pub async fn plan_pj(
                 }
             };
             let rendered_body = render_or_passthrough(spec, raw, &ctx, &mut renderer)?;
-            let current_body = read_existing_text(dst_abs.as_path())?;
+            // Plan against what the previous layer would have left, and
+            // only fall back to disk for a dst no earlier entry touched.
+            let current_body = match simulated.get(&state_key) {
+                Some(body) => body.clone(),
+                None => read_existing_text(dst_abs.as_path())?,
+            };
 
             let mode = for_how(spec.how);
             let action_ctx = ActionContext {
@@ -764,9 +822,58 @@ pub async fn plan_pj(
                 ai_sema: plan_sema.clone(),
             };
             let plan = mode.plan(&action_ctx).await?;
+            // Carry the would-be body forward for the next entry on
+            // this dst. An unknowable body (`how = "ai"` / `"script"`,
+            // or a refused `Diverged`) clears the simulation instead of
+            // guessing: later entries then read disk, and the collapse
+            // pass below declines to touch the dst at all.
+            match &plan.new_body {
+                Some(body) => {
+                    simulated.insert(state_key.clone(), Some(body.clone()));
+                    planned_in_run.insert(state_key);
+                }
+                None => {
+                    simulated.remove(&state_key);
+                }
+            }
             out.push((dst_rel, plan.kind, plan.diff));
         }
     }
+
+    // Collapse `Update` to `Unchanged` for any dst whose simulated end
+    // state matches its pre-apply bytes — the preview-side twin of the
+    // apply path's `Wrote` -> `Unchanged` collapse (#81).
+    //
+    // Only dsts with two or more entries qualify; a single-entry dst
+    // already reports accurately from its own mode's byte-compare.
+    // A dst whose end state is unknown (an `ai` / `script` entry in the
+    // chain cleared the simulation) is left alone rather than guessed.
+    let mut entry_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (dst, _, _) in &out {
+        *entry_counts.entry(dst.clone()).or_default() += 1;
+    }
+    let collapsible: std::collections::HashSet<String> = entry_counts
+        .into_iter()
+        .filter(|&(_, count)| count >= 2)
+        .map(|(dst, _)| dst)
+        .filter(
+            |dst| match (simulated.get(dst.as_str()), initial_disk.get(dst.as_str())) {
+                (Some(final_body), Some(initial)) => final_body == initial,
+                _ => false,
+            },
+        )
+        .collect();
+    if !collapsible.is_empty() {
+        for (dst, kind, diff) in &mut out {
+            if matches!(kind, crate::modes::PlanKind::Update) && collapsible.contains(dst.as_str())
+            {
+                *kind = crate::modes::PlanKind::Unchanged;
+                *diff = None;
+            }
+        }
+    }
+
     Ok(out)
 }
 

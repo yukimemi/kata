@@ -27,9 +27,13 @@ impl ApplyMode for Script {
     async fn plan(&self, ctx: &ActionContext<'_>) -> Result<ActionPlan> {
         let run = require_run(ctx)?;
         let (cmd, args) = render_run(ctx, run)?;
+        // `new_body` stays `None`: a script's effect on the dst is
+        // whatever the command does, which the plan can't know without
+        // running it.
         Ok(ActionPlan {
             kind: PlanKind::Update,
             diff: Some(would_run_line(&cmd, &args)),
+            new_body: None,
         })
     }
 
