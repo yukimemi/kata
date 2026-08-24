@@ -49,6 +49,49 @@ pub struct Manifest {
     /// can apply).
     #[serde(default)]
     pub requires: Requires,
+    /// GitHub-side state this template wants the PJ's repository to
+    /// be in. Not a file, so it is deliberately not a `[[file]]`
+    /// entry with a `how`: there is no `src` to copy and no `dst` to
+    /// write. See `src/repo.rs`.
+    #[serde(default)]
+    pub repo: Option<RepoSpec>,
+}
+
+/// `[repo]` — desired GitHub-side state for the project's repository.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RepoSpec {
+    /// `[repo.settings]` — passed through to `PATCH repos/{owner}/{repo}`
+    /// verbatim, and compared field-for-field against the matching `GET`.
+    ///
+    /// Deliberately untyped. That endpoint's `GET` and `PATCH` agree on
+    /// flat field names, so kata needs no per-key knowledge in either
+    /// direction and picks up new GitHub fields without a release. The
+    /// price is no schema validation, most of which comes back for free:
+    /// drift detection already holds the `GET` response, so a desired key
+    /// missing from it is reported as a probable typo.
+    #[serde(default)]
+    pub settings: toml::Table,
+    /// `[[repo.secret]]` — Actions secrets. Their own shape rather than
+    /// pass-through because the endpoint is write-only: a value cannot be
+    /// read back, so drift is existence rather than equality.
+    #[serde(default, rename = "secret")]
+    pub secrets: Vec<RepoSecretSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepoSecretSpec {
+    pub name: String,
+    /// Tera-rendered like every other manifest string. Read the value
+    /// from the environment with Tera's built-in `get_env` rather than
+    /// routing it through `vars.*`: vars are persisted into
+    /// `.kata/applied.toml` and read back as a resolution source, so a
+    /// token that goes through them lands on disk in a committed file.
+    ///
+    /// Omit `default=` on `get_env` so a missing variable fails loudly.
+    /// The resilience principle already keeps one PJ's failure from
+    /// stopping `--all`, and a silently-unset secret is the failure mode
+    /// that took a day to spot in yukimemi/tsumiki.
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -235,6 +278,42 @@ impl FileSpec {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn parses_a_repo_block_with_settings_and_secrets() {
+        let raw = r#"
+            name = "pj-base"
+
+            [repo.settings]
+            delete_branch_on_merge = true
+            allow_merge_commit = false
+
+            [[repo.secret]]
+            name = "CLAUDE_CODE_OAUTH_TOKEN"
+            value = "{{ get_env(name=\"Z_CLAUDE_CODE_OAUTH_TOKEN\") }}"
+        "#;
+        let m: Manifest = toml::from_str(raw).unwrap();
+        let repo = m.repo.expect("[repo] should parse");
+        assert_eq!(
+            repo.settings.get("delete_branch_on_merge"),
+            Some(&toml::Value::Boolean(true))
+        );
+        assert_eq!(
+            repo.settings.get("allow_merge_commit"),
+            Some(&toml::Value::Boolean(false))
+        );
+        assert_eq!(repo.secrets.len(), 1);
+        assert_eq!(repo.secrets[0].name, "CLAUDE_CODE_OAUTH_TOKEN");
+        // The value stays a Tera source string here; rendering happens
+        // at apply time, and only for secrets that are actually missing.
+        assert!(repo.secrets[0].value.contains("get_env"));
+    }
+
+    #[test]
+    fn a_manifest_without_a_repo_block_is_still_valid() {
+        let m: Manifest = toml::from_str("name = \"demo\"").unwrap();
+        assert!(m.repo.is_none());
+    }
 
     #[test]
     fn parses_minimal_manifest() {

@@ -245,6 +245,13 @@ pub enum Command {
         /// default to keep the table narrow).
         #[arg(long, requires = "all")]
         paths: bool,
+        /// Also check each PJ's `[repo]` block against its live
+        /// GitHub repository. Opt-in because it turns an instant
+        /// local overview into one or two API calls per project;
+        /// without it `--all` stays offline. Requires `--all`
+        /// (a single-PJ `status` always includes `[repo]`).
+        #[arg(long, requires = "all")]
+        repo: bool,
     },
 
     /// Append a template to this project's applied state and apply.
@@ -531,7 +538,8 @@ impl Cli {
                 all,
                 tags,
                 paths,
-            } => cmd::status::run(at, all, tags, paths, interactive, no_color).await,
+                repo,
+            } => cmd::status::run(at, all, tags, paths, repo, interactive, no_color).await,
             Command::Add {
                 template,
                 rev,

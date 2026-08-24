@@ -68,6 +68,31 @@ existed. Flag with the user before reverting any of them.
     Collapsing to one enum was rejected for forcing artificial
     coupling.
 
+- **`[repo]` is its own section, not a `how`.** GitHub-side state
+  (`delete_branch_on_merge`, Actions secrets) is not a `src` → `dst`
+  copy, so it does not ride on `[[file]]`; `FileSpec.src` is required
+  and an entry there would have to invent a source path. `how =
+  "script"` was the other candidate and fails harder: a script has no
+  readable current state, so `plan` can only say "would run", and a
+  cross-repository check that says that about every PJ forever is not
+  a check. Three consequences worth keeping:
+  - `[repo.settings]` is an untyped pass-through, because `GET` and
+    `PATCH` on `repos/{owner}/{repo}` agree on flat field names — so
+    drift detection and convergence both work with no per-key
+    knowledge, and new GitHub fields need no kata release. Give a
+    setting its own shape only when that symmetry breaks (secrets do;
+    branch protection would).
+  - **Secrets read their value with Tera's `get_env`, never via
+    `KATA_VAR_*` / `vars.*`** — vars are persisted into
+    `.kata/applied.toml` and read back as a resolution source, so a
+    token routed through them lands on disk in a committed file.
+  - **Nothing is recorded in `applied.toml`.** There is no
+    `content_hash` analogue for state that lives on GitHub; the live
+    repository is the record and every plan re-reads it. This is the
+    one place kata's truth is not local, and it is why
+    `status --all` keeps the check behind `--repo`: the default has to
+    stay an instant offline overview.
+
 - **Templates compose, last wins.** A PJ lists templates in order;
   later layers can override files from earlier ones. `pj-base`
   carries language-agnostic basics, `pj-rust` overlays Rust
@@ -164,6 +189,7 @@ src/
   ai/                     — AiAgent trait + claude / gemini / codex backends
   runner/                 — tokio fan-out (PJ × file × AI semaphores) + progress
   ui/                     — diff / icons / interactive prompt
+  repo.rs                 — [repo]: GitHub-side state (settings + secrets)
   git.rs                  — shell-out git wrappers
   paths.rs                — global config / cache / pj root resolution
 ```

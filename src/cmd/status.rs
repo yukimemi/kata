@@ -19,11 +19,12 @@ pub async fn run(
     all: bool,
     tags: Vec<String>,
     paths: bool,
+    repo: bool,
     interactive: bool,
     no_color: bool,
 ) -> Result<()> {
     if all {
-        return run_all(tags, paths, no_color);
+        return run_all(tags, paths, repo, no_color).await;
     }
     run_single(at, interactive, no_color).await
 }
@@ -78,7 +79,12 @@ async fn run_single(at: Option<Utf8PathBuf>, interactive: bool, no_color: bool) 
     Ok(())
 }
 
-fn run_all(tags: Vec<String>, show_paths: bool, no_color: bool) -> Result<()> {
+async fn run_all(
+    tags: Vec<String>,
+    show_paths: bool,
+    check_repo: bool,
+    no_color: bool,
+) -> Result<()> {
     let config = GlobalConfig::load()?;
     let projects = select_registered_projects(&config, &tags);
     if projects.is_empty() {
@@ -92,7 +98,65 @@ fn run_all(tags: Vec<String>, show_paths: bool, no_color: bool) -> Result<()> {
         return Ok(());
     }
 
-    let rows: Vec<DriftRow> = projects.iter().map(DriftRow::from_entry).collect();
+    let mut rows: Vec<DriftRow> = projects.iter().map(DriftRow::from_entry).collect();
+
+    // `--repo`: fold GitHub-side drift into the same rows. Done per PJ
+    // and never with `?`, so one unreachable repository (no network, no
+    // `gh`, revoked token) degrades that row instead of aborting the
+    // sweep — the resilience principle `apply --all` already follows.
+    if check_repo {
+        // Fanned out rather than awaited one project at a time: this is
+        // the only part of `status` that pays network latency, and
+        // serialising it across a registry of twenty would dominate the
+        // command. PJ-level `JoinSet`, as everywhere else in kata.
+        let limit = config.defaults.pj_concurrency.unwrap_or(4).max(1);
+        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(limit));
+        let mut set = tokio::task::JoinSet::new();
+
+        for (idx, (row, entry)) in rows.iter().zip(projects.iter()).enumerate() {
+            // A row that already failed for a more fundamental reason
+            // keeps its own diagnosis. Re-checking a directory that is
+            // not there would only replace "missing dir" with a vaguer
+            // "repo error".
+            if row.status == "missing dir"
+                || row.status == "not init'd"
+                || row.status.starts_with("error:")
+            {
+                continue;
+            }
+            let entry = entry.clone();
+            let gate = gate.clone();
+            set.spawn(async move {
+                let _permit = gate.acquire_owned().await;
+                (idx, repo_lines_for(&entry).await)
+            });
+        }
+
+        while let Some(joined) = set.join_next().await {
+            let Ok((idx, result)) = joined else { continue };
+            let row = &mut rows[idx];
+            match result {
+                // Warnings (a typo in `[repo.settings]`) are shown but are
+                // not drift: nothing on GitHub differs from what was asked
+                // for, the manifest asked for something that does not
+                // exist.
+                Ok((work, warns)) => {
+                    row.drift_detail.extend(warns);
+                    if !work.is_empty() {
+                        row.drift_detail.extend(work);
+                        row.drift_summary = format!("{} drifted", row.drift_detail.len());
+                        row.status = "drift".into();
+                    }
+                }
+                Err(e) => {
+                    row.drift_detail.push(format!("[repo] {e}"));
+                    row.status = "repo error".into();
+                }
+            }
+        }
+    }
+
+    let rows = rows;
     let color = ui::color_enabled(no_color);
 
     let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
@@ -137,6 +201,63 @@ fn run_all(tags: Vec<String>, show_paths: bool, no_color: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The `[repo]` rows a single PJ would report, as display lines.
+///
+/// Reuses the ordinary preview rather than a second code path: a
+/// cross-repository check that could disagree with `kata status` in the
+/// PJ itself would be worse than no check at all. The file half of the
+/// preview is computed and discarded, which is cheap next to the API
+/// calls this is already paying for.
+type RepoLines = (Vec<String>, Vec<String>);
+
+async fn repo_lines_for(entry: &ProjectEntry) -> std::result::Result<RepoLines, String> {
+    let applied = AppliedState::load(&entry.path).map_err(|e| e.to_string())?;
+    if applied.templates.is_empty() {
+        return Ok((vec![], vec![]));
+    }
+    let templates: Vec<TemplateRef> = applied
+        .templates
+        .iter()
+        .map(|t| TemplateRef {
+            source: t.source.clone(),
+            rev: Some(t.rev.clone()),
+            subdir: t.subdir.clone(),
+        })
+        .collect();
+    let base_dir = applied
+        .base_dir
+        .clone()
+        .unwrap_or_else(|| entry.path.clone());
+
+    let plans = plan_pj(
+        entry.clone(),
+        entry.path.clone(),
+        templates,
+        base_dir,
+        toml::Table::new(),
+        // Never prompt: `--all` is a sweep, and a var prompt in the
+        // middle of twenty projects is a hang.
+        false,
+        Default::default(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut work = Vec::new();
+    let mut warns = Vec::new();
+    for (label, kind, _) in plans {
+        if !label.starts_with("[repo] ") {
+            continue;
+        }
+        match kind {
+            crate::modes::PlanKind::Update => work.push(label),
+            crate::modes::PlanKind::SkippedWhen => warns.push(label),
+            _ => {}
+        }
+    }
+    Ok((work, warns))
 }
 
 struct DriftRow {

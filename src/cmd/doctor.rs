@@ -17,6 +17,9 @@ pub fn run(no_color: bool) -> Result<()> {
 
     println!("Tooling:");
     pair("git", detect("git", &["--version"]));
+    // `[repo]` shells out to `gh` so kata inherits the user's GitHub
+    // auth instead of growing a token of its own.
+    pair("gh", detect("gh", &["--version"]));
     pair("claude", detect("claude", &["--version"]));
     pair("gemini", detect("gemini", &["--version"]));
     pair("codex", detect("codex", &["--version"]));
