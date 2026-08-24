@@ -88,14 +88,17 @@ impl ApplyMode for MergeToml {
             None => Ok(ActionPlan {
                 kind: PlanKind::Create,
                 diff: Some(unified_diff("", &new_body, ctx.dst_abs.as_str())),
+                new_body: Some(new_body),
             }),
             Some(cur) if cur == new_body => Ok(ActionPlan {
                 kind: PlanKind::Unchanged,
                 diff: None,
+                new_body: Some(new_body),
             }),
             Some(cur) => Ok(ActionPlan {
                 kind: PlanKind::Update,
                 diff: Some(unified_diff(cur, &new_body, ctx.dst_abs.as_str())),
+                new_body: Some(new_body),
             }),
         }
     }

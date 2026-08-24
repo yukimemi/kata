@@ -18,14 +18,17 @@ impl ApplyMode for Overwrite {
             None => Ok(ActionPlan {
                 kind: PlanKind::Create,
                 diff: Some(unified_diff("", &ctx.rendered_body, ctx.dst_abs.as_str())),
+                new_body: Some(ctx.rendered_body.clone()),
             }),
             Some(cur) if *cur == ctx.rendered_body => Ok(ActionPlan {
                 kind: PlanKind::Unchanged,
                 diff: None,
+                new_body: Some(ctx.rendered_body.clone()),
             }),
             Some(cur) => Ok(ActionPlan {
                 kind: PlanKind::Update,
                 diff: Some(unified_diff(cur, &ctx.rendered_body, ctx.dst_abs.as_str())),
+                new_body: Some(ctx.rendered_body.clone()),
             }),
         }
     }

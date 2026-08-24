@@ -56,7 +56,14 @@ impl ApplyMode for Ai {
             None => PlanKind::Create,
             Some(_) => PlanKind::Update,
         };
-        Ok(ActionPlan { kind, diff: None })
+        // `new_body` stays `None`: the composed body only exists after
+        // the agent round-trip, so a layered plan can't simulate this
+        // dst and falls back to on-disk content for later entries.
+        Ok(ActionPlan {
+            kind,
+            diff: None,
+            new_body: None,
+        })
     }
 
     async fn execute(&self, ctx: &ActionContext<'_>, dry_run: bool) -> Result<ActionOutcome> {

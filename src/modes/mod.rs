@@ -89,6 +89,19 @@ pub struct ActionContext<'a> {
 pub struct ActionPlan {
     pub kind: PlanKind,
     pub diff: Option<String>,
+    /// Body the destination would hold if this entry were applied.
+    ///
+    /// `None` when the mode cannot know it without side effects
+    /// (`how = "ai"` needs the agent, `how = "script"` writes nothing
+    /// itself) or when the entry would refuse to write (`Diverged`).
+    ///
+    /// `plan_pj` threads this across `[[file]]` entries sharing a dst
+    /// so a layered preview composes the way `apply` does: each entry
+    /// plans against what the previous layer would have left on disk,
+    /// not against the pre-apply bytes. Without it, every layer but
+    /// the last is previewed against content it never sees at apply
+    /// time. See #81 / #85.
+    pub new_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
