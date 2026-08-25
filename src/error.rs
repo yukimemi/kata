@@ -35,6 +35,9 @@ pub enum Error {
     #[error("merge: {0}")]
     Merge(String),
 
+    #[error("repo: {0}")]
+    Repo(String),
+
     #[error("ai backend `{agent}` not available: {reason}")]
     AiUnavailable { agent: String, reason: String },
 

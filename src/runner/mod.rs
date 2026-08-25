@@ -481,6 +481,32 @@ pub async fn apply_to_pj(
         }
     }
 
+    // 5b. `[repo]` — GitHub-side state (see `src/repo.rs`). Deliberately
+    //     after the files: a template that ships a workflow *and* the
+    //     secret that workflow needs should land the workflow first, so
+    //     the secret is never sitting on a repository that has no use
+    //     for it yet.
+    //
+    //     Nothing is recorded in `applied.toml`. There is no
+    //     `content_hash` analogue for state that lives on GitHub — the
+    //     live repository is the record, and every plan re-reads it.
+    for handle in &handles {
+        let Some(spec) = handle.manifest.repo.as_ref() else {
+            continue;
+        };
+        if spec.settings.is_empty() && spec.secrets.is_empty() {
+            continue;
+        }
+        let label = format!("[repo] {}", handle.manifest.name);
+        match apply_repo_spec(&pj_root, spec, &mut renderer, &ctx, opts.dry_run).await {
+            Ok(rows) => actions.extend(rows),
+            Err(e) => {
+                errors.push((label.clone(), e.to_string()));
+                actions.push((label, OutcomeKind::Failed));
+            }
+        }
+    }
+
     // 6. Post-loop: stamp `once_applied = true` on every dst that any
     //    when=once entry wrote to (or adopted) during this apply.
     //    Deferred from mid-loop so that multiple entries targeting
@@ -599,6 +625,136 @@ pub async fn apply_to_pj(
         actions,
         errors,
     })
+}
+
+/// Plan and (unless `dry_run`) converge one template's `[repo]` block,
+/// returning one action row per change so repo work shows up in the same
+/// per-entry output files do.
+///
+/// A PJ whose `origin` is not on github.com is not-applicable rather than
+/// broken: it reports `Skipped` and moves on, which is what keeps
+/// `apply --all` usable across a registry that is not uniformly GitHub.
+async fn apply_repo_spec(
+    pj_root: &camino::Utf8Path,
+    spec: &crate::manifest::RepoSpec,
+    renderer: &mut Renderer,
+    ctx: &teravars::Context,
+    dry_run: bool,
+) -> Result<Vec<(String, OutcomeKind)>> {
+    let Some((slug, plan)) = resolve_and_plan_repo(pj_root, spec).await? else {
+        return Ok(vec![(
+            "[repo] (no github remote)".to_string(),
+            OutcomeKind::Skipped,
+        )]);
+    };
+
+    // Warnings are reported but are not writes: `execute` PATCHes only
+    // real differences, so a plan holding nothing but a typo would
+    // otherwise print `wrote [repo] warn: ... typo?` for a run that
+    // changed nothing on GitHub.
+    let mut rows: Vec<(String, OutcomeKind)> = plan
+        .warning_lines()
+        .into_iter()
+        .map(|line| (format!("[repo] {line}"), OutcomeKind::Skipped))
+        .collect();
+
+    if !plan.has_work() {
+        if rows.is_empty() {
+            rows.push((format!("[repo] {slug}"), OutcomeKind::Unchanged));
+        }
+        return Ok(rows);
+    }
+
+    let work: Vec<String> = plan
+        .work_lines()
+        .into_iter()
+        .map(|line| format!("[repo] {line}"))
+        .collect();
+
+    if dry_run {
+        rows.extend(work.into_iter().map(|l| (l, OutcomeKind::Skipped)));
+        return Ok(rows);
+    }
+
+    // Values are rendered only for the secrets that are actually
+    // missing. A repository already holding its secrets can then be
+    // converged from a machine that does not have the tokens in its
+    // environment at all — which is most machines, most of the time.
+    let mut values = Vec::new();
+    for change in &plan.secrets {
+        let Some(declared) = spec.secrets.iter().find(|s| s.name == change.name) else {
+            continue;
+        };
+        values.push((change.name.clone(), renderer.render(&declared.value, ctx)?));
+    }
+
+    crate::repo::execute(&crate::repo::Gh, &slug, &spec.settings, &plan, &values).await?;
+    rows.extend(work.into_iter().map(|l| (l, OutcomeKind::Wrote)));
+    Ok(rows)
+}
+
+/// Resolve the PJ's GitHub slug and read the live repository.
+///
+/// `None` means the PJ has no github.com `origin` — not-applicable, not
+/// a failure. Shared by the apply pass and the preview so the two can
+/// never disagree about what "already converged" means.
+async fn resolve_and_plan_repo(
+    pj_root: &camino::Utf8Path,
+    spec: &crate::manifest::RepoSpec,
+) -> Result<Option<(crate::repo::Slug, crate::repo::RepoPlan)>> {
+    let Some(slug) = crate::repo::slug_of(pj_root).await else {
+        return Ok(None);
+    };
+    let names: Vec<String> = spec.secrets.iter().map(|s| s.name.clone()).collect();
+    let plan = crate::repo::plan(&crate::repo::Gh, &slug, &spec.settings, &names).await?;
+    Ok(Some((slug, plan)))
+}
+
+/// Preview half of `apply_repo_spec`, shaped like the file planner's rows.
+pub async fn plan_repo_spec(
+    pj_root: &camino::Utf8Path,
+    spec: &crate::manifest::RepoSpec,
+) -> Result<Vec<(String, crate::modes::PlanKind, Option<String>)>> {
+    let Some((slug, plan)) = resolve_and_plan_repo(pj_root, spec).await? else {
+        return Ok(vec![(
+            "[repo] (no github remote)".to_string(),
+            crate::modes::PlanKind::SkippedWhen,
+            None,
+        )]);
+    };
+    // Same split as the apply side: a typo is shown, but it is not drift
+    // and must not be counted as one.
+    let mut out: Vec<(String, crate::modes::PlanKind, Option<String>)> = plan
+        .warning_lines()
+        .into_iter()
+        .map(|line| {
+            (
+                format!("[repo] {line}"),
+                crate::modes::PlanKind::SkippedWhen,
+                None,
+            )
+        })
+        .collect();
+
+    if !plan.has_work() {
+        if out.is_empty() {
+            out.push((
+                format!("[repo] {slug}"),
+                crate::modes::PlanKind::Unchanged,
+                None,
+            ));
+        }
+        return Ok(out);
+    }
+
+    out.extend(plan.work_lines().into_iter().map(|line| {
+        (
+            format!("[repo] {line}"),
+            crate::modes::PlanKind::Update,
+            None,
+        )
+    }));
+    Ok(out)
 }
 
 fn render_dst(
@@ -872,6 +1028,20 @@ pub async fn plan_pj(
                 *diff = None;
             }
         }
+    }
+
+    // `[repo]` preview. This reads the live repository, so a `status` in
+    // a PJ that declares `[repo]` costs one or two GitHub calls — which
+    // is why `status --all` keeps it behind `--repo` rather than turning
+    // an instant local overview into a network sweep.
+    for handle in &handles {
+        let Some(spec) = handle.manifest.repo.as_ref() else {
+            continue;
+        };
+        if spec.settings.is_empty() && spec.secrets.is_empty() {
+            continue;
+        }
+        out.extend(plan_repo_spec(&pj_root, spec).await?);
     }
 
     Ok(out)

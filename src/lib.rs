@@ -13,6 +13,7 @@ pub mod modes;
 pub mod paths;
 pub mod preset;
 pub mod render;
+pub mod repo;
 pub mod runner;
 pub mod template;
 pub mod ui;
