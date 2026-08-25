@@ -196,6 +196,93 @@ pub fn parse_slug(url: &str) -> Option<Slug> {
     })
 }
 
+/// Whether this machine can talk to GitHub at all.
+///
+/// Not having `gh`, or having it unauthenticated, is a fact about the
+/// environment rather than drift on the repository — the same category
+/// as a PJ whose `origin` is not GitHub. Treating it as a failure would
+/// break the one place kata runs unattended: the daily `kata-apply`
+/// workflow shells out on a runner where `gh` is installed but no
+/// `GH_TOKEN` is exported, and `kata apply` exits non-zero as soon as
+/// any action fails. That failure lands *before* the step that opens
+/// the PR, so a template shipping `[repo]` could not deliver the
+/// workflow fix for its own breakage. Skipping is what keeps that from
+/// being a deadlock.
+///
+/// The cost is that a genuinely broken local `gh` login is skipped
+/// rather than shouted about — but the row still prints its reason, so
+/// it is quiet, not invisible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Readiness {
+    Ready,
+    /// `gh` is not on PATH.
+    NoGh,
+    /// `gh` is installed but has no usable login.
+    NotAuthenticated,
+}
+
+impl Readiness {
+    /// The parenthetical shown on a skipped row.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Readiness::Ready => "ready",
+            Readiness::NoGh => "gh is not installed",
+            Readiness::NotAuthenticated => "gh is not authenticated",
+        }
+    }
+}
+
+/// Probed at most once per command run.
+///
+/// Whether `gh` exists and holds a github.com login is process-global
+/// and cannot change under a single invocation, while `readiness()` is
+/// called once per `[repo]`-bearing PJ — and `status --all --repo` fans
+/// that out across the whole registry. Without this, a registry of
+/// twenty pays forty `gh` spawns, one of which validates a credential
+/// over the network, to answer the same question twenty times.
+static READINESS: tokio::sync::OnceCell<Readiness> = tokio::sync::OnceCell::const_new();
+
+/// Is `gh` present, and logged in to github.com?
+///
+/// `gh auth status` is the check rather than a trial API call, because a
+/// failing `gh api` cannot distinguish "no credentials" from "this
+/// repository does not exist" or "the network is down", and only the
+/// first of those should be quiet.
+pub async fn readiness() -> Readiness {
+    READINESS.get_or_init(probe_readiness).await.clone()
+}
+
+async fn probe_readiness() -> Readiness {
+    let installed = Command::new("gh")
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !installed {
+        return Readiness::NoGh;
+    }
+    // Scoped to github.com deliberately. Bare `gh auth status` reports
+    // on every configured host, and everything downstream here talks to
+    // github.com and nothing else — so an unscoped check answers a
+    // different question than the one being asked, in both directions:
+    // a login to an enterprise host only would pass it and then fail at
+    // `gh api` (reopening the very deadlock this skip exists to
+    // prevent), and a stale credential for some unrelated host would
+    // fail it while github.com is perfectly usable.
+    let authed = Command::new("gh")
+        .args(["auth", "status", "--hostname", "github.com"])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if authed {
+        Readiness::Ready
+    } else {
+        Readiness::NotAuthenticated
+    }
+}
+
 /// The GitHub slug for a project checkout, or `None` when it has no
 /// github.com `origin`.
 pub async fn slug_of(pj_root: &Utf8Path) -> Option<Slug> {
@@ -612,6 +699,18 @@ mod tests {
             }],
         };
         assert!(plan.has_work());
+    }
+
+    #[test]
+    fn every_not_ready_state_can_explain_itself() {
+        // These strings end up in a `[repo] (...)` row, so they have to
+        // read as an explanation rather than an error code.
+        assert_eq!(Readiness::NoGh.reason(), "gh is not installed");
+        assert_eq!(
+            Readiness::NotAuthenticated.reason(),
+            "gh is not authenticated"
+        );
+        assert_ne!(Readiness::Ready, Readiness::NoGh);
     }
 
     #[test]

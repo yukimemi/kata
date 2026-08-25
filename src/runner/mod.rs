@@ -641,11 +641,11 @@ async fn apply_repo_spec(
     ctx: &teravars::Context,
     dry_run: bool,
 ) -> Result<Vec<(String, OutcomeKind)>> {
-    let Some((slug, plan)) = resolve_and_plan_repo(pj_root, spec).await? else {
-        return Ok(vec![(
-            "[repo] (no github remote)".to_string(),
-            OutcomeKind::Skipped,
-        )]);
+    let (slug, plan) = match resolve_and_plan_repo(pj_root, spec).await? {
+        RepoTarget::Ready(slug, plan) => (slug, plan),
+        RepoTarget::Skip(reason) => {
+            return Ok(vec![(format!("[repo] ({reason})"), OutcomeKind::Skipped)]);
+        }
     };
 
     // Warnings are reported but are not writes: `execute` PATCHes only
@@ -693,21 +693,36 @@ async fn apply_repo_spec(
     Ok(rows)
 }
 
+/// What the `[repo]` pass found when it looked.
+enum RepoTarget {
+    Ready(crate::repo::Slug, crate::repo::RepoPlan),
+    /// Not applicable here, with the reason to show. Never a failure:
+    /// no GitHub remote, no `gh`, or no `gh` login are all facts about
+    /// where kata is running rather than drift on a repository.
+    Skip(&'static str),
+}
+
 /// Resolve the PJ's GitHub slug and read the live repository.
 ///
-/// `None` means the PJ has no github.com `origin` — not-applicable, not
-/// a failure. Shared by the apply pass and the preview so the two can
-/// never disagree about what "already converged" means.
+/// Shared by the apply pass and the preview so the two can never
+/// disagree about what "already converged" means.
 async fn resolve_and_plan_repo(
     pj_root: &camino::Utf8Path,
     spec: &crate::manifest::RepoSpec,
-) -> Result<Option<(crate::repo::Slug, crate::repo::RepoPlan)>> {
+) -> Result<RepoTarget> {
+    // Checked before the remote lookup so an unattended run says why it
+    // skipped, rather than reporting "no github remote" for a
+    // repository that has one.
+    let readiness = crate::repo::readiness().await;
+    if readiness != crate::repo::Readiness::Ready {
+        return Ok(RepoTarget::Skip(readiness.reason()));
+    }
     let Some(slug) = crate::repo::slug_of(pj_root).await else {
-        return Ok(None);
+        return Ok(RepoTarget::Skip("no github remote"));
     };
     let names: Vec<String> = spec.secrets.iter().map(|s| s.name.clone()).collect();
     let plan = crate::repo::plan(&crate::repo::Gh, &slug, &spec.settings, &names).await?;
-    Ok(Some((slug, plan)))
+    Ok(RepoTarget::Ready(slug, plan))
 }
 
 /// Preview half of `apply_repo_spec`, shaped like the file planner's rows.
@@ -715,12 +730,15 @@ pub async fn plan_repo_spec(
     pj_root: &camino::Utf8Path,
     spec: &crate::manifest::RepoSpec,
 ) -> Result<Vec<(String, crate::modes::PlanKind, Option<String>)>> {
-    let Some((slug, plan)) = resolve_and_plan_repo(pj_root, spec).await? else {
-        return Ok(vec![(
-            "[repo] (no github remote)".to_string(),
-            crate::modes::PlanKind::SkippedWhen,
-            None,
-        )]);
+    let (slug, plan) = match resolve_and_plan_repo(pj_root, spec).await? {
+        RepoTarget::Ready(slug, plan) => (slug, plan),
+        RepoTarget::Skip(reason) => {
+            return Ok(vec![(
+                format!("[repo] ({reason})"),
+                crate::modes::PlanKind::SkippedWhen,
+                None,
+            )]);
+        }
     };
     // Same split as the apply side: a typo is shown, but it is not drift
     // and must not be counted as one.
