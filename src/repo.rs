@@ -286,6 +286,15 @@ async fn probe_readiness() -> Readiness {
 /// The GitHub slug for a project checkout, or `None` when it has no
 /// github.com `origin`.
 pub async fn slug_of(pj_root: &Utf8Path) -> Option<Slug> {
+    if let Some(url) = git_origin(pj_root).await {
+        return parse_slug(&url);
+    }
+    parse_slug(&jj_origin(pj_root).await?)
+}
+
+/// `origin` as git reports it. `None` when there is no git repository here,
+/// which is the normal case inside a jj workspace.
+async fn git_origin(pj_root: &Utf8Path) -> Option<String> {
     let out = Command::new("git")
         .args(["-C", pj_root.as_str(), "remote", "get-url", "origin"])
         .output()
@@ -294,7 +303,39 @@ pub async fn slug_of(pj_root: &Utf8Path) -> Option<Slug> {
     if !out.status.success() {
         return None;
     }
-    parse_slug(String::from_utf8_lossy(&out.stdout).trim())
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `origin` as jj reports it.
+///
+/// A renri worktree is a jj *workspace*: it has a `.jj` and no `.git`, so
+/// `git -C <root> remote get-url origin` fails there and the project looks
+/// remote-less. It is not — it is the same GitHub repository the main
+/// checkout points at, and answering "no github remote" for it is exactly
+/// the wrong answer this skip exists to avoid giving.
+///
+/// `jj git remote list` prints `<name> <url>` per line.
+async fn jj_origin(pj_root: &Utf8Path) -> Option<String> {
+    let out = Command::new("jj")
+        .args(["-R", pj_root.as_str(), "git", "remote", "list"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_jj_remote_list(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The `origin` url out of `jj git remote list` output.
+fn parse_jj_remote_list(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        if parts.next()? != "origin" {
+            return None;
+        }
+        parts.next().map(str::to_string)
+    })
 }
 
 /// The GitHub operations `[repo]` needs, behind a trait so the planning
@@ -554,6 +595,39 @@ mod tests {
         ] {
             assert_eq!(parse_slug(url).as_ref(), Some(&want), "url: {url}");
         }
+    }
+
+    #[test]
+    fn jj_remote_list_yields_the_origin_url() {
+        let out = "origin https://github.com/yukimemi/tsumiki.git\n";
+        assert_eq!(
+            parse_jj_remote_list(out).as_deref(),
+            Some("https://github.com/yukimemi/tsumiki.git")
+        );
+    }
+
+    #[test]
+    fn jj_remote_list_picks_origin_out_of_several_remotes() {
+        let out =
+            "upstream https://github.com/other/x.git\norigin git@github.com:yukimemi/tsumiki.git\n";
+        assert_eq!(
+            parse_jj_remote_list(out).as_deref(),
+            Some("git@github.com:yukimemi/tsumiki.git")
+        );
+    }
+
+    #[test]
+    fn jj_remote_list_without_an_origin_is_none() {
+        assert_eq!(
+            parse_jj_remote_list("upstream https://example.com/x.git\n"),
+            None
+        );
+        assert_eq!(parse_jj_remote_list(""), None);
+        // A name that merely starts with "origin" is a different remote.
+        assert_eq!(
+            parse_jj_remote_list("origin2 https://example.com/x.git\n"),
+            None
+        );
     }
 
     #[test]
