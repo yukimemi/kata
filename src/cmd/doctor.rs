@@ -20,6 +20,11 @@ pub fn run(no_color: bool) -> Result<()> {
     // `[repo]` shells out to `gh` so kata inherits the user's GitHub
     // auth instead of growing a token of its own.
     pair("gh", detect("gh", &["--version"]));
+    // Also `[repo]`: a renri worktree is a jj workspace with no `.git`,
+    // so resolving its origin falls back to jj. Absent is fine — the
+    // fallback degrades to "no github remote" — but a jj user seeing
+    // that answer wants to know whether this is why.
+    pair("jj", detect("jj", &["--version"]));
     pair("claude", detect("claude", &["--version"]));
     pair("gemini", detect("gemini", &["--version"]));
     pair("codex", detect("codex", &["--version"]));
