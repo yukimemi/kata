@@ -41,25 +41,47 @@ e2e = ["CARGO_TARGET_DIR={{ vars.cache }}/kata-target cargo test --locked --all-
 # Same gate as CI. `[tasks.check]` in Makefile.toml is documented as "same as
 # CI" and its dependencies (editorconfig-check, fmt-check, clippy, test,
 # lock-check) do map onto ci.yml's job set (editorconfig, fmt, clippy, test,
-# lockfile) command-for-command. ci.yml also has a bare "check" job
-# (`cargo check --all-targets`, no --locked) that has no dedicated Makefile.toml
-# task — but it adds no coverage `cargo make check` lacks: `lock-check` already
-# proves Cargo.lock matches Cargo.toml under `--locked`, and `clippy` compiles
-# the same targets on top of that resolution, so nothing can fail the unlocked
-# `cargo check` and pass both of those. `coverage` (cargo llvm-cov + Codecov
-# upload) is deliberately left out of the gate: it's a metrics job, not a
-# correctness check, it doesn't even fail CI on upload error
-# (`fail_ci_if_error: false`), and cargo-llvm-cov isn't part of this repo's
-# toolchain. A gate that differs from CI turns a clean magi run into a red PR,
-# which is the one failure this arrangement cannot absorb.
-gate = ["CARGO_TARGET_DIR={{ vars.cache }}/kata-target cargo make check"]
+# lockfile) command-for-command — except editorconfig-check is not equivalent
+# in enforcement: the Makefile.toml task silently exits 0 when the
+# `editorconfig-checker` binary is missing from PATH, while ci.yml's
+# editorconfig job always installs it via
+# editorconfig-checker/action-editorconfig-checker before running it, so it
+# never skips. Relying on `cargo make check` alone would let a CRLF/whitespace
+# violation pass a gate run on a machine without the binary installed and
+# still fail CI, so the gate invokes `editorconfig-checker` directly first —
+# a missing binary then fails the gate loudly instead of skipping, matching
+# CI's mandatory enforcement.
+#
+# ci.yml also has a bare "check" job (`cargo check --all-targets`, no
+# --locked) that has no dedicated Makefile.toml task — but it adds no
+# coverage `cargo make check` lacks: `lock-check` already proves Cargo.lock
+# matches Cargo.toml under `--locked`, and `clippy` compiles the same targets
+# on top of that resolution, so nothing can fail the unlocked `cargo check`
+# and pass both of those. `coverage` (cargo llvm-cov + Codecov upload) is
+# deliberately left out of the gate: it's a metrics job, not a correctness
+# check, it doesn't even fail CI on upload error (`fail_ci_if_error: false`),
+# and cargo-llvm-cov isn't part of this repo's toolchain. A gate that differs
+# from CI turns a clean magi run into a red PR, which is the one failure this
+# arrangement cannot absorb.
+gate = [
+    "editorconfig-checker",
+    "CARGO_TARGET_DIR={{ vars.cache }}/kata-target cargo make check",
+]
 
 [merge]
-mode = "none"
 # Required here, and in every jj-colocated repo: jj keeps git's HEAD detached at
 # the working-copy commit, so magi cannot infer the base branch from
 # `git symbolic-ref HEAD`.
 base = "main"
+# `mode` is deliberately left unset here, unlike magi's own self-hosting
+# magi.toml (which pins `mode = "none"`): the machine layer's default was
+# moved from `"none"` to `"pr"` specifically because `"none"` leaves a clean,
+# gated run sitting on a branch with only a printed manual-merge command, and
+# nobody runs it — a ready fix stays unmerged until someone notices by hand.
+# kata already follows the ordinary GitHub PR workflow described in
+# AGENTS.md, with nothing about this checkout that needs the machine
+# default's fix undone, so it inherits `mode = "pr"` rather than
+# re-overriding it back to `"none"`.
 
 # Project conventions appended to the node prompts, never merged into them.
 # Repository-wide context lives in AGENTS.md, which every agent already reads
