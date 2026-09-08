@@ -1,0 +1,96 @@
+# magi competing on kata.
+#
+# **Only what is peculiar to this checkout lives here.** The roster, the seat
+# assignment, the shape of a run and the update policy moved to the machine
+# layer (`<config_dir>/magi/config.toml`), because none of them are facts about
+# this repository: they are facts about which agent CLIs are installed and what
+# the operator is willing to spend. Stating them once there is the point of
+# having layers, and it keeps this file to the things a different machine would
+# still need to be told.
+#
+# What that leaves, and why each one has to be here:
+#
+# - `[verify]` runs `cargo`. A repository that is not Rust cannot inherit it.
+# - `[merge] base` names this repository's branch, and is required at all
+#   because of how this checkout is set up (see below).
+# - `[prompts]` are this project's conventions.
+#
+# Note that an array may be declared in exactly one layer
+# (`Config::refuse_split_arrays`), so `[verify]`'s arrays being here is also
+# why the roster's arrays are *only* over there.
+#
+# Rendered by teravars. Tera braces are live everywhere in this file, but
+# comments are stripped before Tera sees them (teravars >= 0.2.2), so a comment
+# may quote `{{ ... }}` freely.
+
+[vars]
+# Shared build cache for the verification commands. Override per machine with
+# MAGI_CACHE. Lives beside its only consumer: `[vars]` is rendered per file, so
+# a value used by this file's templates is stated in this file.
+cache = "{{ env.MAGI_CACHE | default(value='/tmp') }}"
+
+[verify]
+# The real-machine leg, run in the winner's worktree once per review round.
+#
+# CARGO_TARGET_DIR is shared on purpose: each candidate worktree would otherwise
+# compile this crate from scratch, which is by far the slowest thing in a run on
+# a Rust repo (minutes, against ~90 s of agent latency per node). Only the
+# winner's worktree runs these commands, and only one at a time, so nothing
+# contends on cargo's lock.
+e2e = ["CARGO_TARGET_DIR={{ vars.cache }}/kata-target cargo test --locked --all-targets"]
+# Same gate as CI. `[tasks.check]` in Makefile.toml is documented as "same as
+# CI" and its dependencies (editorconfig-check, fmt-check, clippy, test,
+# lock-check) do map onto ci.yml's job set (editorconfig, fmt, clippy, test,
+# lockfile) command-for-command, so `cargo make check` is the whole gate.
+#
+# editorconfig-check is the one dependency whose *enforcement* differs from
+# CI: the Makefile.toml task silently exits 0 when the `editorconfig-checker`
+# binary isn't on PATH, while ci.yml's editorconfig job always installs it
+# first, so it never skips. This gate does not force that dependency by
+# invoking `editorconfig-checker` on its own: doing so trades a narrow,
+# occasional coverage gap (a CRLF/whitespace violation on a non-Rust file
+# slipping past a machine that lacks the binary, still caught by CI) for an
+# unconditional one — any process whose inherited PATH predates the binary's
+# installation (a long-running magi daemon started before the tool was
+# installed, for one; confirmed on this machine, where the daemon has been up
+# since well before `editorconfig-checker` was added to PATH) would then fail
+# every single gate run with a spawn error, permanently, not occasionally.
+# `cargo make check`'s existing soft-skip is the safer default.
+#
+# ci.yml also has a bare "check" job (`cargo check --all-targets`, no
+# --locked) that has no dedicated Makefile.toml task — but it adds no
+# coverage `cargo make check` lacks: `lock-check` already proves Cargo.lock
+# matches Cargo.toml under `--locked`, and `clippy` compiles the same targets
+# on top of that resolution, so nothing can fail the unlocked `cargo check`
+# and pass both of those. `coverage` (cargo llvm-cov + Codecov upload) is
+# deliberately left out of the gate: it's a metrics job, not a correctness
+# check, it doesn't even fail CI on upload error (`fail_ci_if_error: false`),
+# and cargo-llvm-cov isn't part of this repo's toolchain. A gate that differs
+# from CI turns a clean magi run into a red PR, which is the one failure this
+# arrangement cannot absorb.
+gate = ["CARGO_TARGET_DIR={{ vars.cache }}/kata-target cargo make check"]
+
+[merge]
+mode = "none"
+# Required here, and in every jj-colocated repo: jj keeps git's HEAD detached at
+# the working-copy commit, so magi cannot infer the base branch from
+# `git symbolic-ref HEAD`.
+base = "main"
+# `mode = "none"` is stated explicitly rather than left to inherit the machine
+# layer's `"pr"` default: kata is the template applier every other yukimemi/*
+# repo (and its own CI/release pipeline) depends on, the same self-hosting
+# concern that keeps magi's own magi.toml pinned to `"none"` instead of
+# following its own machine-layer default. A run landing here unattended is a
+# bigger blast radius than in an ordinary consumer repo, so this checkout
+# keeps the human merge step magi's own repo keeps for itself, at the cost of
+# the machine layer's "pr" fix for runs going stale unmerged.
+
+# Project conventions appended to the node prompts, never merged into them.
+# Repository-wide context lives in AGENTS.md, which every agent already reads
+# from the checkout; these are the things a magi *node* needs to know.
+[prompts]
+all = """
+This repository uses jj (Jujutsu) with a colocated git repo. `git commit` works \
+in a candidate worktree and is what magi expects, but never run `jj` commands \
+and never touch the main working copy.
+"""
