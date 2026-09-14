@@ -48,7 +48,7 @@ serde_yaml = "0.9.34"
 # the consumer's interleaved keys. Pulls in indexmap transitively.
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 toml = "1.1.6"
-toml_edit = "0.25.13"
+toml_edit = "0.25.15"
 
 # Errors
 thiserror = "2.0.20"
