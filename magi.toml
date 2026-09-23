@@ -71,19 +71,10 @@ e2e = ["CARGO_TARGET_DIR={{ vars.cache }}/kata-target cargo test --locked --all-
 gate = ["CARGO_TARGET_DIR={{ vars.cache }}/kata-target cargo make check"]
 
 [merge]
-mode = "none"
 # Required here, and in every jj-colocated repo: jj keeps git's HEAD detached at
 # the working-copy commit, so magi cannot infer the base branch from
 # `git symbolic-ref HEAD`.
 base = "main"
-# `mode = "none"` is stated explicitly rather than left to inherit the machine
-# layer's `"pr"` default: kata is the template applier every other yukimemi/*
-# repo (and its own CI/release pipeline) depends on, the same self-hosting
-# concern that keeps magi's own magi.toml pinned to `"none"` instead of
-# following its own machine-layer default. A run landing here unattended is a
-# bigger blast radius than in an ordinary consumer repo, so this checkout
-# keeps the human merge step magi's own repo keeps for itself, at the cost of
-# the machine layer's "pr" fix for runs going stale unmerged.
 
 # Project conventions appended to the node prompts, never merged into them.
 # Repository-wide context lives in AGENTS.md, which every agent already reads
