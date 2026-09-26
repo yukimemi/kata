@@ -51,7 +51,7 @@ toml = "1.1.6"
 toml_edit = "0.25.15"
 
 # Errors
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 anyhow = "1.0.104"
 
 # Filesystem / paths
