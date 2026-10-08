@@ -266,3 +266,65 @@ fn repos_without_marker_behave_as_before() {
     let applied = std::fs::read_to_string(pj.join(".kata/applied.toml")).unwrap();
     assert!(!applied.contains("ignored"), "{applied}");
 }
+
+#[test]
+fn equivalent_dst_spellings_are_all_ignored() {
+    let td = TempDir::new().unwrap();
+    let pj = fixture(td.path());
+    // A second layer spelling the same dst as `./shared.txt`.
+    let top = td.path().join("templates/top");
+    write(
+        &top.join("template.toml"),
+        r#"
+name = "top"
+[[file]]
+src = "shared.txt"
+dst = "./shared.txt"
+how = "overwrite"
+when = "always"
+"#,
+    );
+    ignore(td.path(), &pj, "shared.txt").success();
+    apply(td.path(), &pj, &[]).success();
+    assert!(!pj.join("shared.txt").exists());
+}
+
+#[test]
+fn ignored_vars_seed_with_broken_toml_does_not_fail() {
+    let td = TempDir::new().unwrap();
+    let base = td.path().join("templates/base");
+    write(
+        &base.join("template.toml"),
+        r#"
+name = "base"
+[[file]]
+src = "vars.toml"
+dst = ".kata/vars.toml"
+how = "overwrite"
+when = "once"
+"#,
+    );
+    write(&base.join("vars.toml"), "x = 1\n");
+    write(
+        &td.path().join("presets/default.toml"),
+        "name = \"default\"\n[[templates]]\nsource = \"../templates/base\"\n",
+    );
+    let pj = td.path().join("demo");
+    kata(td.path())
+        .arg("init")
+        .arg(td.path().join("presets/default.toml"))
+        .arg("--at")
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+    ignore(td.path(), &pj, ".kata/vars.toml").success();
+    write(&base.join("vars.toml"), "x = [\n");
+    apply(td.path(), &pj, &[]).success();
+    kata(td.path())
+        .args(["status", "--at"])
+        .arg(&pj)
+        .arg("--non-interactive")
+        .assert()
+        .success();
+}

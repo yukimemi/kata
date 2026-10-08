@@ -104,7 +104,7 @@ async fn plan_destinations(
     {
         Ok(plans) => plans
             .into_iter()
-            .map(|(dst, _, _)| dst)
+            .map(|(dst, _, _)| normalize_relative_path(&dst))
             .filter(|d| !d.starts_with("[repo] "))
             .collect(),
         Err(_) => BTreeSet::new(),
