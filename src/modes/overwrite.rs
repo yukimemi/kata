@@ -68,14 +68,16 @@ impl ApplyMode for Overwrite {
             // gates on `when` and the once-adoption fast path
             // before invoking us), but be explicit in case callers
             // compose plans externally.
-            PlanKind::SkippedWhen | PlanKind::SkippedOnce | PlanKind::Diverged => {
-                Ok(ActionOutcome {
-                    kind: OutcomeKind::Skipped,
-                    decision: None,
-                    diff: plan.diff,
-                    error: None,
-                })
-            }
+            PlanKind::SkippedWhen
+            | PlanKind::SkippedOnce
+            | PlanKind::Diverged
+            | PlanKind::Ignored
+            | PlanKind::IgnoredPresent => Ok(ActionOutcome {
+                kind: OutcomeKind::Skipped,
+                decision: None,
+                diff: plan.diff,
+                error: None,
+            }),
             // Map adoption plans onto the matching outcome so the
             // ActionPlan -> ActionOutcome translation stays
             // consistent for any external composer that goes

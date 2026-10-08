@@ -248,6 +248,20 @@ pub async fn apply_to_pj(
 
             let state_key = dst_rel.clone();
 
+            // `kata ignore` marker: wins over every `when` / `how` and
+            // over --force / --reseed. Checked before anything reads
+            // the dst, and the dst is kept out of the once / net-delta
+            // bookkeeping so no layer sharing it can write either.
+            if applied.files.get(&state_key).is_some_and(|s| s.ignored) {
+                let kind = if dst_abs.as_std_path().symlink_metadata().is_ok() {
+                    OutcomeKind::IgnoredPresent
+                } else {
+                    OutcomeKind::Ignored
+                };
+                actions.push((dst_rel, kind));
+                continue;
+            }
+
             // Snapshot disk state on first encounter with this dst —
             // before any layer can have written to it in this run.
             // Drives the post-loop net-delta pass (#81). Safe to read
@@ -897,6 +911,17 @@ pub async fn plan_pj(
 
             let state_key = dst_rel.clone();
 
+            // `kata ignore` marker; see `apply_to_pj`.
+            if applied.files.get(&state_key).is_some_and(|s| s.ignored) {
+                let kind = if dst_abs.as_std_path().symlink_metadata().is_ok() {
+                    crate::modes::PlanKind::IgnoredPresent
+                } else {
+                    crate::modes::PlanKind::Ignored
+                };
+                out.push((dst_rel, kind, None));
+                continue;
+            }
+
             // Snapshot the pre-apply bytes the first time this dst is
             // seen — before any earlier entry's simulated write — so
             // the net-delta pass below has the same baseline the apply
@@ -1183,7 +1208,7 @@ fn spec_is_vars_seed(spec: &crate::manifest::FileSpec) -> bool {
 /// Returns an empty string if the path tries to escape the root
 /// (more `..` than non-`..` components). `spec_is_vars_seed` then
 /// drops the entry because the empty string won't `strip_prefix(".kata/")`.
-fn normalize_relative_path(s: &str) -> String {
+pub(crate) fn normalize_relative_path(s: &str) -> String {
     use std::path::{Component, Path, PathBuf};
     let unified: String = s.chars().map(|c| if c == '\\' { '/' } else { c }).collect();
     let mut buf = PathBuf::new();
@@ -1244,7 +1269,7 @@ fn read_existing_text(path: &camino::Utf8Path) -> Result<Option<String>> {
 ///
 /// This is the load-bearing security check that makes apply safe
 /// against hostile / buggy template metadata.
-fn check_relative_contained(rel: &str, kind: &str) -> Result<()> {
+pub(crate) fn check_relative_contained(rel: &str, kind: &str) -> Result<()> {
     use std::path::{Component, Path};
     let p = Path::new(rel);
     if p.is_absolute() {

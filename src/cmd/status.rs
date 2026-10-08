@@ -199,6 +199,13 @@ async fn run_all(
                 println!("    {line}");
             }
         }
+        for line in &r.ignored_detail {
+            if color {
+                println!("    {}", line.dimmed());
+            } else {
+                println!("    {line}");
+            }
+        }
     }
     Ok(())
 }
@@ -272,6 +279,9 @@ struct DriftRow {
     status: String,
     /// Per-file lines printed under the row when there's drift.
     drift_detail: Vec<String>,
+    /// Files marked `ignored` (`kata ignore`): never drift, but listed
+    /// so a deliberate omission is not forgotten.
+    ignored_detail: Vec<String>,
 }
 
 impl DriftRow {
@@ -285,6 +295,7 @@ impl DriftRow {
                 drift_summary: "-".into(),
                 status: "missing dir".into(),
                 drift_detail: vec![],
+                ignored_detail: vec![],
             };
         }
         let applied = match AppliedState::load(&entry.path) {
@@ -297,6 +308,7 @@ impl DriftRow {
                     drift_summary: "-".into(),
                     status: format!("error: {e}"),
                     drift_detail: vec![],
+                    ignored_detail: vec![],
                 };
             }
         };
@@ -308,10 +320,12 @@ impl DriftRow {
                 drift_summary: "-".into(),
                 status: "not init'd".into(),
                 drift_detail: vec![],
+                ignored_detail: vec![],
             };
         }
 
         let (tracked, drift_detail) = check_drift(&entry.path, &applied);
+        let ignored_detail = ignored_lines(&entry.path, &applied);
         let drift_summary = if drift_detail.is_empty() {
             "clean".into()
         } else {
@@ -329,8 +343,30 @@ impl DriftRow {
             drift_summary,
             status,
             drift_detail,
+            ignored_detail,
         }
     }
+}
+
+/// One line per `kata ignore`d file, noting when it is still on disk.
+fn ignored_lines(pj_root: &Utf8Path, applied: &AppliedState) -> Vec<String> {
+    applied
+        .files
+        .iter()
+        .filter(|(_, fs)| fs.ignored)
+        .map(|(dst_rel, _)| {
+            if pj_root
+                .join(dst_rel)
+                .as_std_path()
+                .symlink_metadata()
+                .is_ok()
+            {
+                format!("{dst_rel}  (ignored — present on disk, untouched)")
+            } else {
+                format!("{dst_rel}  (ignored)")
+            }
+        })
+        .collect()
 }
 
 /// For each file kata is tracking on this PJ, compare the
@@ -340,6 +376,10 @@ fn check_drift(pj_root: &Utf8Path, applied: &AppliedState) -> (usize, Vec<String
     let mut tracked = 0;
     let mut drift = Vec::new();
     for (dst_rel, file_state) in &applied.files {
+        // `kata ignore`d files are deliberately outside drift tracking.
+        if file_state.ignored {
+            continue;
+        }
         let Some(expected) = file_state.content_hash.as_deref() else {
             continue;
         };
