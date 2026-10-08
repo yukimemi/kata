@@ -78,6 +78,24 @@ pub struct FileState {
     /// file on future applies.
     #[serde(default, skip_serializing_if = "is_false")]
     pub once_applied: bool,
+    /// Marker set by `kata ignore`: the consumer deliberately does
+    /// not want this file. `apply` neither writes nor recreates it
+    /// (whatever its `how` / `when`), and `status` reports it as
+    /// ignored instead of drift. Cleared by `kata unignore`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ignored: bool,
+}
+
+impl FileState {
+    /// True when the entry carries no information, so it can be
+    /// dropped from `applied.toml` rather than written as `[files."x"]`.
+    pub fn is_empty(&self) -> bool {
+        self.last_ai_run.is_none()
+            && self.last_decision.is_none()
+            && self.content_hash.is_none()
+            && !self.once_applied
+            && !self.ignored
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -194,6 +212,59 @@ mod tests {
             loaded.files["Makefile.toml"].content_hash.as_deref(),
             Some("abc")
         );
+    }
+
+    #[test]
+    fn ignored_round_trips() {
+        let td = TempDir::new().unwrap();
+        let pj = Utf8PathBuf::from_path_buf(td.path().to_path_buf()).unwrap();
+        let mut s = AppliedState::default();
+        s.record(
+            ".github/workflows/ci.yml",
+            FileState {
+                ignored: true,
+                ..Default::default()
+            },
+        );
+        s.save(&pj).unwrap();
+
+        let raw = std::fs::read_to_string(pj.join(".kata/applied.toml")).unwrap();
+        assert!(raw.contains("ignored = true"), "got: {raw}");
+        let loaded = AppliedState::load(&pj).unwrap();
+        assert!(loaded.files[".github/workflows/ci.yml"].ignored);
+    }
+
+    #[test]
+    fn ignored_false_is_not_serialised() {
+        let td = TempDir::new().unwrap();
+        let pj = Utf8PathBuf::from_path_buf(td.path().to_path_buf()).unwrap();
+        let mut s = AppliedState::default();
+        s.record(
+            "a.txt",
+            FileState {
+                content_hash: Some("abc".into()),
+                ..Default::default()
+            },
+        );
+        s.save(&pj).unwrap();
+        let raw = std::fs::read_to_string(pj.join(".kata/applied.toml")).unwrap();
+        assert!(!raw.contains("ignored"), "got: {raw}");
+    }
+
+    #[test]
+    fn old_applied_toml_without_ignored_still_loads() {
+        let td = TempDir::new().unwrap();
+        let pj = Utf8PathBuf::from_path_buf(td.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(pj.join(".kata")).unwrap();
+        std::fs::write(
+            pj.join(".kata/applied.toml"),
+            "[files.\"a.txt\"]\ncontent_hash = \"abc\"\nonce_applied = true\n",
+        )
+        .unwrap();
+        let loaded = AppliedState::load(&pj).unwrap();
+        let f = &loaded.files["a.txt"];
+        assert!(!f.ignored);
+        assert!(f.once_applied);
     }
 
     #[test]

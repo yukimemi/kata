@@ -304,6 +304,35 @@ pub enum Command {
         at: Option<Utf8PathBuf>,
     },
 
+    /// Tell kata a template-managed file is intentionally absent.
+    ///
+    /// Records `ignored = true` in `.kata/applied.toml` and deletes
+    /// the file (asking first unless `--yes`). `kata apply` then
+    /// neither writes nor recreates it, even with
+    /// `--reseed`; a copy still on disk is left untouched. Only files
+    /// kata already knows (in the current templates or recorded in
+    /// `applied.toml`) can be ignored. Undo with `kata unignore`.
+    Ignore {
+        /// File path(s), relative to the project root.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        #[arg(long, value_name = "DIR")]
+        at: Option<Utf8PathBuf>,
+        /// Delete without asking for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Clear the `kata ignore` marker; the next `kata apply` manages
+    /// (and, for `when = "always"` files, restores) the file again.
+    Unignore {
+        /// File path(s), relative to the project root.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        #[arg(long, value_name = "DIR")]
+        at: Option<Utf8PathBuf>,
+    },
+
     /// Refresh the cache slot for git-sourced templates and bump
     /// recorded revs in `applied.toml`. No-op for local templates.
     Update {
@@ -569,6 +598,10 @@ impl Cli {
                 )
                 .await
             }
+            Command::Ignore { paths, at, yes } => {
+                cmd::ignore::run(paths, at, yes, non_interactive, no_color).await
+            }
+            Command::Unignore { paths, at } => cmd::ignore::run_unignore(paths, at),
             Command::Remove { template, at } => cmd::remove::run(template, at, no_color).await,
             Command::Update {
                 templates,

@@ -25,6 +25,8 @@ pub fn print_outcome(dst: &str, kind: OutcomeKind, no_color: bool) {
         OutcomeKind::Skipped => ("skipped", "skipped   "),
         OutcomeKind::Adopted => ("adopted", "adopted   "),
         OutcomeKind::Failed => ("failed", "failed    "),
+        OutcomeKind::Ignored => ("ignored", "ignored   "),
+        OutcomeKind::IgnoredPresent => ("ignored", "ignored   "),
     };
     let _ = label;
     if color_enabled(no_color) {
@@ -34,7 +36,15 @@ pub fn print_outcome(dst: &str, kind: OutcomeKind, no_color: bool) {
             OutcomeKind::Skipped => println!("  {} {}", "skipped  ".yellow(), dst),
             OutcomeKind::Adopted => println!("  {} {}", "adopted  ".blue().bold(), dst),
             OutcomeKind::Failed => println!("  {} {}", "failed   ".red().bold(), dst),
+            OutcomeKind::Ignored => println!("  {} {}", "ignored  ".dimmed(), dst),
+            OutcomeKind::IgnoredPresent => println!(
+                "  {} {} (present on disk, untouched)",
+                "ignored  ".yellow(),
+                dst
+            ),
         }
+    } else if kind == OutcomeKind::IgnoredPresent {
+        println!("  {plain}{dst} (present on disk, untouched)");
     } else {
         println!("  {plain}{dst}");
     }
@@ -50,6 +60,13 @@ pub fn print_plan(dst: &str, kind: PlanKind, no_color: bool) {
         PlanKind::SkippedOnce => "skip(once)",
         PlanKind::AdoptedExisting => "adopt",
         PlanKind::Diverged => "diverged",
+        PlanKind::Ignored => "ignored",
+        PlanKind::IgnoredPresent => "ignored",
+    };
+    let note = if kind == PlanKind::IgnoredPresent {
+        " (present on disk, untouched)"
+    } else {
+        ""
     };
     if color_enabled(no_color) {
         let coloured = match kind {
@@ -61,10 +78,12 @@ pub fn print_plan(dst: &str, kind: PlanKind, no_color: bool) {
             }
             PlanKind::AdoptedExisting => format!("{:<10}", label).blue().bold().to_string(),
             PlanKind::Diverged => format!("{:<10}", label).red().bold().to_string(),
+            PlanKind::Ignored => format!("{:<10}", label).dimmed().to_string(),
+            PlanKind::IgnoredPresent => format!("{:<10}", label).yellow().to_string(),
         };
-        println!("  {} {}", coloured, dst);
+        println!("  {} {}{}", coloured, dst, note);
     } else {
-        println!("  {:<10} {}", label, dst);
+        println!("  {:<10} {}{}", label, dst, note);
     }
 }
 

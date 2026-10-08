@@ -395,6 +395,9 @@ pub struct FileState {
     pub content_hash: Option<String>,
     #[serde(default)]
     pub once_applied: bool,
+    /// Set by `kata ignore`; apply skips the file entirely.
+    #[serde(default)]
+    pub ignored: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -507,6 +510,7 @@ pub async fn execute(plan: ApplyPlan, opts: RunnerOpts) -> Result<ApplyReport>;
 | `kata diff [<pj>...]` | `--all`, `--file <path>`, `--no-color` | Unified diff, yui-style |
 | `kata add <template>` | `--rev <ref>`, `--at <path>` | Append to `applied.toml.templates` then `apply` |
 | `kata remove <template>` | `--at <path>`, `--clean` | Remove from `applied.toml`. `--clean` also deletes files (confirms first) |
+| `kata ignore <path>...` / `kata unignore <path>...` | `--at <path>`, `--yes` (ignore only) | Set / clear `ignored = true` on a file in `applied.toml`; `ignore` also deletes the file (confirms first) |
 | `kata list` | `--templates`, `--projects`, `--preset <preset>`, `--icons` | Inventory views |
 | `kata pj add <path>` | `--name <name>`, `--tags <a,b>` | Register a PJ in global config |
 | `kata pj remove <name-or-path>` | | Deregister |

@@ -125,6 +125,10 @@ pub enum PlanKind {
     AdoptedExisting,
     /// dst content has diverged in a way the mode can't auto-resolve
     Diverged,
+    /// Marked `ignored` by `kata ignore`; dst is absent and stays so.
+    Ignored,
+    /// Marked `ignored` but the file is still on disk; left untouched.
+    IgnoredPresent,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +149,10 @@ pub enum OutcomeKind {
     /// applies skip. See `PlanKind::AdoptedExisting`.
     Adopted,
     Failed,
+    /// Marked `ignored` by `kata ignore`; not written, not recreated.
+    Ignored,
+    /// Marked `ignored` but the file is still on disk; left untouched.
+    IgnoredPresent,
 }
 
 #[async_trait]

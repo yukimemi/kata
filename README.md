@@ -84,6 +84,42 @@ kata list
 The `<source>:<preset-name>` syntax is the same Terraform-module-style
 spec [described in AGENTS.md](./AGENTS.md): `<source>[@<rev>][//<subdir>][:<preset-name>]`.
 
+## Ignoring a template-managed file
+
+A repo that deliberately does not want a template file (say, the CI
+workflows on a private repo with no Actions minutes) can tell kata so:
+
+```sh
+kata ignore .github/workflows/ci.yml      # asks, deletes the file, records the marker
+kata ignore -y .github/workflows/release.yml .github/workflows/auto-tag.yml
+kata unignore .github/workflows/ci.yml    # clear the marker
+```
+
+`ignore` records `ignored = true` for the file in `.kata/applied.toml`:
+
+```toml
+[files.".github/workflows/ci.yml"]
+ignored = true
+```
+
+- `kata apply` skips an ignored file entirely: it is not written and not
+  recreated, whatever its `how` / `when`. `--reseed` does not override
+  it; only `kata unignore` does. When several template layers target the
+  same destination, all of them stop.
+- If an ignored file still exists on disk, `apply` and `status` say
+  `ignored (present on disk, untouched)` and leave it alone.
+- `kata status` shows ignored files as `ignored` (never as drift or
+  missing), `kata status --all` lists them under each project, and
+  `kata list` marks them `(ignored)`, so a deliberate omission is not
+  forgotten.
+- `kata unignore` only clears the marker. The next `kata apply` follows
+  the file's normal `when` rules: an `always` file comes back; a `once`
+  file that was already applied still needs `--reseed`.
+- Only files kata already knows (in the current templates or recorded in
+  `applied.toml`) can be ignored. In `--non-interactive` mode `ignore`
+  needs `--yes` when it has to delete a file.
+- Older kata versions do not know the field and may restore the file.
+
 ## Global config
 
 `~/.config/kata/config.toml` holds tool defaults under `[defaults]`

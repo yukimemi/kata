@@ -4,6 +4,7 @@
 pub mod add;
 pub mod apply;
 pub mod doctor;
+pub mod ignore;
 pub mod init;
 pub mod list;
 pub mod register;

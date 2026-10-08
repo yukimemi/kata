@@ -54,7 +54,8 @@ fn run_single(at: Option<Utf8PathBuf>, no_color: bool) -> Result<()> {
     println!("files ({} tracked):", applied.files.len());
     for (k, fs) in &applied.files {
         let once = if fs.once_applied { " (once)" } else { "" };
-        println!("  - {k}{once}");
+        let ignored = if fs.ignored { " (ignored)" } else { "" };
+        println!("  - {k}{once}{ignored}");
     }
     Ok(())
 }

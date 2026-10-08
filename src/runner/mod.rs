@@ -160,7 +160,7 @@ pub async fn apply_to_pj(
     //    the seed has actually been written to disk (#53).
     let env_vars = VarSources::from_env();
     let vars_file = VarSources::load_vars_file(&pj_root)?;
-    let template_seed = collect_template_seed_vars(&handles)?;
+    let template_seed = collect_template_seed_vars(&handles, &applied)?;
     let sources = VarSources {
         cli: opts.cli_vars.clone(),
         env: env_vars,
@@ -247,6 +247,20 @@ pub async fn apply_to_pj(
             let src_abs = handle.root.join(&spec.src);
 
             let state_key = dst_rel.clone();
+
+            // `kata ignore` marker: wins over every `when` / `how` and
+            // over --force / --reseed. Checked before anything reads
+            // the dst, and the dst is kept out of the once / net-delta
+            // bookkeeping so no layer sharing it can write either.
+            if is_ignored(&applied, &dst_rel) {
+                let kind = if dst_abs.as_std_path().symlink_metadata().is_ok() {
+                    OutcomeKind::IgnoredPresent
+                } else {
+                    OutcomeKind::Ignored
+                };
+                actions.push((dst_rel, kind));
+                continue;
+            }
 
             // Snapshot disk state on first encounter with this dst —
             // before any layer can have written to it in this run.
@@ -843,7 +857,7 @@ pub async fn plan_pj(
     }
     let env_vars = VarSources::from_env();
     let vars_file = VarSources::load_vars_file(&pj_root)?;
-    let template_seed = collect_template_seed_vars(&handles)?;
+    let template_seed = collect_template_seed_vars(&handles, &applied)?;
     let sources = VarSources {
         cli: cli_vars,
         env: env_vars,
@@ -896,6 +910,17 @@ pub async fn plan_pj(
             let src_abs = handle.root.join(&spec.src);
 
             let state_key = dst_rel.clone();
+
+            // `kata ignore` marker; see `apply_to_pj`.
+            if is_ignored(&applied, &dst_rel) {
+                let kind = if dst_abs.as_std_path().symlink_metadata().is_ok() {
+                    crate::modes::PlanKind::IgnoredPresent
+                } else {
+                    crate::modes::PlanKind::Ignored
+                };
+                out.push((dst_rel, kind, None));
+                continue;
+            }
 
             // Snapshot the pre-apply bytes the first time this dst is
             // seen — before any earlier entry's simulated write — so
@@ -1090,7 +1115,10 @@ pub async fn plan_pj(
 /// (no Tera evaluation of `dst` yet — we don't have a context this
 /// early). Templates that need a Tera-templated `dst` will silently
 /// skip; that's the right behaviour for now.
-fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table> {
+fn collect_template_seed_vars(
+    handles: &[TemplateHandle],
+    applied: &AppliedState,
+) -> Result<toml::Table> {
     let mut seed = toml::Table::new();
     // Each layer ships its own `vars.toml` (#86: also `vars.<layer>.toml`).
     // We pull every `[[file]]` whose dst lands inside `.kata/` and
@@ -1105,7 +1133,7 @@ fn collect_template_seed_vars(handles: &[TemplateHandle]) -> Result<toml::Table>
             .manifest
             .files
             .iter()
-            .filter(|spec| spec_is_vars_seed(spec))
+            .filter(|spec| spec_is_vars_seed(spec) && !is_ignored(applied, spec.dst_or_src()))
             .collect();
         // `vars.toml` goes last so its deep-merge wins on a
         // leaf-key conflict regardless of layer-name first letter.
@@ -1183,7 +1211,22 @@ fn spec_is_vars_seed(spec: &crate::manifest::FileSpec) -> bool {
 /// Returns an empty string if the path tries to escape the root
 /// (more `..` than non-`..` components). `spec_is_vars_seed` then
 /// drops the entry because the empty string won't `strip_prefix(".kata/")`.
-fn normalize_relative_path(s: &str) -> String {
+/// True when `dst` is marked `ignored` in `applied`. Compared on the
+/// normalised key (`./a` == `a`, `\` == `/`), so equivalent spellings
+/// of one file — across layers, or in a hand-written key — agree.
+fn is_ignored(applied: &AppliedState, dst: &str) -> bool {
+    if applied.files.get(dst).is_some_and(|s| s.ignored) {
+        return true;
+    }
+    let norm = normalize_relative_path(dst);
+    !norm.is_empty()
+        && applied
+            .files
+            .iter()
+            .any(|(k, s)| s.ignored && normalize_relative_path(k) == norm)
+}
+
+pub(crate) fn normalize_relative_path(s: &str) -> String {
     use std::path::{Component, Path, PathBuf};
     let unified: String = s.chars().map(|c| if c == '\\' { '/' } else { c }).collect();
     let mut buf = PathBuf::new();
@@ -1244,7 +1287,7 @@ fn read_existing_text(path: &camino::Utf8Path) -> Result<Option<String>> {
 ///
 /// This is the load-bearing security check that makes apply safe
 /// against hostile / buggy template metadata.
-fn check_relative_contained(rel: &str, kind: &str) -> Result<()> {
+pub(crate) fn check_relative_contained(rel: &str, kind: &str) -> Result<()> {
     use std::path::{Component, Path};
     let p = Path::new(rel);
     if p.is_absolute() {
